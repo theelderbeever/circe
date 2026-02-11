@@ -15,7 +15,8 @@ use scylla::statement::prepared::PreparedStatement;
 
 use crate::convert::scylla_type_to_arrow;
 use crate::error::ScyllaProviderError;
-use crate::exec::{RangeCompleteCallback, ScyllaTokenRangeExec};
+
+use super::exec::{RangeCompleteCallback, ScyllaTokenRangeExec};
 
 /// A DataFusion TableProvider that reads from ScyllaDB using token range scans.
 ///

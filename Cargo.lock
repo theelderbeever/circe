@@ -551,8 +551,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fac4744fb15ae8337dc853fee7fb3f4e48c0fbaa23d0afe49c447b4fab126118"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -572,8 +574,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "circe-cli",
+ "circe-providers",
  "clap",
  "pretty_assertions",
+ "scylla",
  "tikv-jemallocator",
  "tokio",
 ]
@@ -583,17 +587,21 @@ name = "circe-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "circe-providers",
  "clap",
  "datafusion",
+ "hex",
  "indicatif",
  "num_cpus",
  "scylla",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-indicatif",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -604,6 +612,7 @@ dependencies = [
  "datafusion",
  "futures",
  "itertools",
+ "num_cpus",
  "object_store",
  "pretty_assertions",
  "scylla",

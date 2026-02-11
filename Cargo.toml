@@ -7,9 +7,20 @@ authors.workspace = true
 
 [dependencies]
 circe-cli = { path = "circe-cli" }
+circe-providers = { path = "circe-providers" }
 clap = { workspace = true }
 anyhow = "1"
 tokio = { workspace = true, features = ["full"] }
+
+# Only needed for examples
+scylla = { workspace = true, optional = true }
+
+[features]
+examples = ["scylla"]
+
+[[example]]
+name = "populate_test_data"
+required-features = ["examples"]
 
 
 [dev-dependencies]

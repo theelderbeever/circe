@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::EquivalenceProperties;
@@ -21,13 +20,12 @@ use scylla::client::session::Session as ScyllaSession;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::Row;
 
-use crate::convert::rows_to_record_batch;
-
 /// Callback invoked when a token range query completes.
 /// The argument is the range index.
 pub type RangeCompleteCallback = Arc<dyn Fn(usize) + Send + Sync>;
 
-const BATCH_SIZE: usize = 8192;
+// Re-export BatchingStream for use by from_query
+pub(in crate::providers) use batching::BatchingStream;
 
 /// A token range within the Murmur3 hash space.
 #[derive(Debug, Clone)]
@@ -80,6 +78,7 @@ pub struct ScyllaTokenRangeExec {
     properties: PlanProperties,
     projection: Option<Vec<usize>>,
     on_range_complete: Option<RangeCompleteCallback>,
+    concurrency_per_partition: usize,
 }
 
 impl fmt::Debug for ScyllaTokenRangeExec {
@@ -100,8 +99,19 @@ impl ScyllaTokenRangeExec {
         concurrency: usize,
         num_ranges: usize,
     ) -> Self {
-        let partitioned_ranges = partition_ranges(num_ranges, concurrency);
-        let num_partitions = partitioned_ranges.len();
+        // Use num_cpus for DataFusion partitions, distribute concurrency across them
+        let num_partitions = num_cpus::get();
+        let concurrency_per_partition = (concurrency / num_partitions).max(1);
+
+        let partitioned_ranges = partition_ranges(num_ranges, num_partitions);
+
+        tracing::info!(
+            num_ranges,
+            num_partitions,
+            concurrency_per_partition,
+            total_concurrency = num_partitions * concurrency_per_partition,
+            "Token range scan configured"
+        );
 
         let properties = PlanProperties::new(
             EquivalenceProperties::new(full_schema.clone()),
@@ -119,6 +129,7 @@ impl ScyllaTokenRangeExec {
             properties,
             projection: None,
             on_range_complete: None,
+            concurrency_per_partition,
         }
     }
 
@@ -191,12 +202,15 @@ impl ExecutionPlan for ScyllaTokenRangeExec {
         let full_schema = self.full_schema.clone();
         let projection = self.projection.clone();
         let on_range_complete = self.on_range_complete.clone();
+        let concurrency = self.concurrency_per_partition;
 
-        // Build an async stream that:
-        // 1. Iterates over assigned token ranges
-        // 2. Runs up to 8 concurrent CQL queries per partition
-        // 3. Flattens the per-range row streams
-        // 4. Batches rows into RecordBatches
+        tracing::debug!(
+            partition,
+            num_ranges = ranges.len(),
+            concurrency,
+            "Executing token range partition"
+        );
+
         let stream = futures::stream::once(async move {
             let row_stream = futures::stream::iter(ranges)
                 .map(move |range| {
@@ -215,10 +229,10 @@ impl ExecutionPlan for ScyllaTokenRangeExec {
                         }))
                     }
                 })
-                .buffered(8)
+                .buffered(concurrency)
                 .try_flatten();
 
-            let batched = BatchingStream::new(row_stream, full_schema, projection);
+            let batched = BatchingStream::new(Box::pin(row_stream), full_schema, projection);
             Ok::<_, DataFusionError>(batched)
         })
         .try_flatten();
@@ -240,12 +254,15 @@ async fn query_token_range(
     impl Stream<Item = std::result::Result<Row, DataFusionError>>,
     DataFusionError,
 > {
-    tracing::debug!(start, end, "Querying token range");
+    tracing::debug!(start, end, "Starting token range query");
 
     let pager = session
         .execute_iter((*prepared).clone(), (start, end))
         .await
-        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        .map_err(|e| {
+            tracing::error!(start, end, error = %e, "Token range query failed");
+            DataFusionError::External(Box::new(e))
+        })?;
 
     let typed_stream = pager
         .rows_stream::<Row>()
@@ -254,74 +271,90 @@ async fn query_token_range(
     Ok(typed_stream.map_err(|e| DataFusionError::External(Box::new(e))))
 }
 
-/// A stream that accumulates rows into batches of `BATCH_SIZE` and converts
-/// them to Arrow RecordBatches with optional projection.
-struct BatchingStream<S> {
-    inner: S,
-    buffer: Vec<Row>,
-    full_schema: SchemaRef,
-    projection: Option<Vec<usize>>,
-    done: bool,
-}
+mod batching {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
 
-impl<S> BatchingStream<S> {
-    fn new(inner: S, full_schema: SchemaRef, projection: Option<Vec<usize>>) -> Self {
-        Self {
-            inner,
-            buffer: Vec::with_capacity(BATCH_SIZE),
-            full_schema,
-            projection,
-            done: false,
+    use datafusion::arrow::datatypes::SchemaRef;
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::error::{DataFusionError, Result};
+    use futures::Stream;
+    use scylla::value::Row;
+
+    use crate::convert::rows_to_record_batch;
+
+    const BATCH_SIZE: usize = 8192;
+
+    /// A stream that accumulates rows into batches of `BATCH_SIZE` and converts
+    /// them to Arrow RecordBatches with optional projection.
+    pub(in crate::providers) struct BatchingStream {
+        inner: Pin<Box<dyn Stream<Item = std::result::Result<Row, DataFusionError>> + Send>>,
+        buffer: Vec<Row>,
+        full_schema: SchemaRef,
+        projection: Option<Vec<usize>>,
+        done: bool,
+    }
+
+    impl BatchingStream {
+        pub(in crate::providers) fn new(
+            inner: Pin<Box<dyn Stream<Item = std::result::Result<Row, DataFusionError>> + Send>>,
+            full_schema: SchemaRef,
+            projection: Option<Vec<usize>>,
+        ) -> Self {
+            Self {
+                inner,
+                buffer: Vec::with_capacity(BATCH_SIZE),
+                full_schema,
+                projection,
+                done: false,
+            }
+        }
+
+        fn flush_buffer(&mut self) -> Result<RecordBatch> {
+            let batch = rows_to_record_batch(&self.buffer, &self.full_schema)?;
+            self.buffer.clear();
+
+            match &self.projection {
+                Some(indices) => batch
+                    .project(indices)
+                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None)),
+                None => Ok(batch),
+            }
         }
     }
 
-    fn flush_buffer(&mut self) -> Result<RecordBatch> {
-        let batch = rows_to_record_batch(&self.buffer, &self.full_schema)?;
-        self.buffer.clear();
+    impl Stream for BatchingStream {
+        type Item = Result<RecordBatch>;
 
-        match &self.projection {
-            Some(indices) => batch
-                .project(indices)
-                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None)),
-            None => Ok(batch),
-        }
-    }
-}
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.get_mut();
 
-impl<S> Stream for BatchingStream<S>
-where
-    S: Stream<Item = std::result::Result<Row, DataFusionError>> + Unpin,
-{
-    type Item = Result<RecordBatch>;
+            if this.done {
+                return Poll::Ready(None);
+            }
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        if this.done {
-            return Poll::Ready(None);
-        }
-
-        loop {
-            match Pin::new(&mut this.inner).poll_next(cx) {
-                Poll::Ready(Some(Ok(row))) => {
-                    this.buffer.push(row);
-                    if this.buffer.len() >= BATCH_SIZE {
+            loop {
+                match this.inner.as_mut().poll_next(cx) {
+                    Poll::Ready(Some(Ok(row))) => {
+                        this.buffer.push(row);
+                        if this.buffer.len() >= BATCH_SIZE {
+                            return Poll::Ready(Some(this.flush_buffer()));
+                        }
+                    }
+                    Poll::Ready(Some(Err(e))) => {
+                        this.done = true;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Ready(None) => {
+                        this.done = true;
+                        if this.buffer.is_empty() {
+                            return Poll::Ready(None);
+                        }
                         return Poll::Ready(Some(this.flush_buffer()));
                     }
-                }
-                Poll::Ready(Some(Err(e))) => {
-                    this.done = true;
-                    return Poll::Ready(Some(Err(e)));
-                }
-                Poll::Ready(None) => {
-                    this.done = true;
-                    if this.buffer.is_empty() {
-                        return Poll::Ready(None);
+                    Poll::Pending => {
+                        return Poll::Pending;
                     }
-                    return Poll::Ready(Some(this.flush_buffer()));
-                }
-                Poll::Pending => {
-                    return Poll::Pending;
                 }
             }
         }
