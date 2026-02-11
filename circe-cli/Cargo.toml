@@ -1,0 +1,23 @@
+[package]
+name = "circe-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+clap = { workspace = true, features = ["derive", "env"] }
+circe-providers = { path = "../circe-providers" }
+datafusion = { workspace = true, features = ["serde"] }
+scylla = { workspace = true, features = ["full-serialization"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-indicatif = { workspace = true }
+indicatif = { workspace = true }
+url = { workspace = true }
+anyhow = "1"
+num_cpus = { workspace = true }
+
+[lints]
+workspace = true

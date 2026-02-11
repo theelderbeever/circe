@@ -1,0 +1,70 @@
+[package]
+name = "circe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+circe-cli = { path = "circe-cli" }
+clap = { workspace = true }
+anyhow = "1"
+tokio = { workspace = true, features = ["full"] }
+
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.6", features = [
+    "unprefixed_malloc_on_supported_platforms",
+    "override_allocator_on_supported_platforms",
+] }
+
+[workspace]
+
+members = ["circe-cli", "circe-providers"]
+
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+authors = ["Taylor Beever <taybeever@gmail.com>"]
+
+[workspace.lints]
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+print_stdout = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+complexity = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+ahash = { version = "0.8", features = ["serde"] }
+flume = "0.11"
+tracing = { version = "0.1.41", features = ["async-await"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-opentelemetry = { version = "0.27", features = ["thiserror"] }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1.49", features = ["full"] }
+thiserror = "1"
+pretty_assertions = "1"
+scylla = { version = "1.4.1", features = ["full-serialization"] }
+object_store = { version = "0.12", features = ["aws", "serde", "serde_json"] }
+duration-string = "0.5"
+datafusion = "52"
+itertools = "0.14"
+futures = "0.3"
+async-trait = "0.1"
+tokio-stream = "0.1"
+tracing-indicatif = "0.3"
+indicatif = "0.18"
+url = "2"
+num_cpus = "1"

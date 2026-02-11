@@ -1,0 +1,23 @@
+[package]
+name = "circe-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+datafusion = { workspace = true, features = ["serde"] }
+scylla = { workspace = true, features = ["full-serialization"] }
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+object_store = { workspace = true }
+itertools = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+pretty_assertions = { workspace = true }
+
+[lints]
+workspace = true
