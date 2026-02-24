@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
@@ -8,6 +10,7 @@ use datafusion::prelude::SessionContext;
 use indicatif::ProgressStyle;
 use scylla::client::session_builder::SessionBuilder;
 
+use scylla::frame::Compression;
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use url::Url;
 
@@ -140,7 +143,7 @@ impl Cli {
             let current_span = tracing::Span::current();
             current_span.pb_set_style(
                 &ProgressStyle::with_template(
-                    "[{elapsed_precise}] {bar:100.cyan/blue} {pos:>5}/{len:5} {per_sec}",
+                    "[{elapsed_precise}] {bar:100.cyan/blue} {pos:>5}/{len:5} {per_sec:.1} [{eta_precise}]",
                 )
                 .context("invalid progress bar template")?,
             );
@@ -157,6 +160,51 @@ impl Cli {
         }
     }
 
+    /// Spawns a background task to monitor and display throughput metrics.
+    /// Returns a span for the throughput indicator and a task handle.
+    fn spawn_throughput_monitor(
+        row_counter: Arc<AtomicU64>,
+    ) -> (tracing::Span, tokio::task::JoinHandle<()>) {
+        let throughput_span = tracing::info_span!(parent: &tracing::Span::current(), "throughput");
+        throughput_span.pb_set_style(
+            &ProgressStyle::with_template("Throughput: {msg} rows/sec (total: {human_pos} rows)")
+                .expect("valid progress bar template"),
+        );
+
+        // Initialize the display
+        throughput_span.pb_set_message("0");
+        throughput_span.pb_set_position(0);
+
+        let span_clone = throughput_span.clone();
+        let handle = tokio::spawn(async move {
+            let _entered = span_clone.enter();
+            let mut last_count = 0u64;
+            let mut last_instant = tokio::time::Instant::now();
+
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                let current_count = row_counter.load(Ordering::Relaxed);
+                let now = tokio::time::Instant::now();
+                let elapsed = now.duration_since(last_instant).as_secs_f64();
+
+                if elapsed > 0.0 {
+                    let delta = current_count.saturating_sub(last_count);
+                    let rate = delta as f64 / elapsed;
+
+                    span_clone.pb_set_position(current_count);
+                    span_clone.pb_set_message(&format!("{:.0}", rate));
+                    span_clone.pb_tick();
+                }
+
+                last_count = current_count;
+                last_instant = now;
+            }
+        });
+
+        (throughput_span, handle)
+    }
+
     #[tracing::instrument]
     pub async fn execute(self) -> anyhow::Result<()> {
         // --- Tracing setup ---
@@ -165,7 +213,9 @@ impl Cli {
         // --- ScyllaDB session ---
         let mut session_builder = SessionBuilder::new();
         for node in &self.scylla.known_nodes {
-            session_builder = session_builder.known_node(node);
+            session_builder = session_builder
+                .known_node(node)
+                .compression(Some(Compression::Lz4));
         }
         if let (Some(user), Some(password)) =
             (&self.scylla.scylla_user, &self.scylla.scylla_password)
@@ -239,12 +289,29 @@ async fn run_token_range(
     let partition_cols = output.partition_by.clone().unwrap_or(partition_keys);
     let num_ranges = provider.num_ranges();
 
+    // Spawn throughput monitor FIRST so it appears above the progress bar
+    let (throughput_span, throughput_handle) = if interactive {
+        let row_counter = provider.row_counter();
+        let (span, handle) = Cli::spawn_throughput_monitor(row_counter);
+        (Some(span), Some(handle))
+    } else {
+        (None, None)
+    };
+
     // Set progress bar length after we know the count
     if interactive {
         tracing::Span::current().pb_set_length(num_ranges as u64);
     }
 
     write_hive_partitioned_parquet(ctx, provider, &output.output, partition_cols).await?;
+
+    // Stop throughput monitor
+    if let Some(handle) = throughput_handle {
+        handle.abort();
+    }
+
+    // Keep throughput_span alive until here
+    drop(throughput_span);
 
     if let Some(span) = &progress_span {
         // Force final progress bar update to 100%
@@ -335,12 +402,29 @@ async fn run_from_query(
     let partition_cols = output.partition_by.clone().unwrap_or_default();
     let num_queries = provider.num_queries();
 
+    // Spawn throughput monitor FIRST so it appears above the progress bar
+    let (throughput_span, throughput_handle) = if _interactive {
+        let row_counter = provider.row_counter();
+        let (span, handle) = Cli::spawn_throughput_monitor(row_counter);
+        (Some(span), Some(handle))
+    } else {
+        (None, None)
+    };
+
     // Set progress bar length after we know the count
     if _interactive {
         tracing::Span::current().pb_set_length(num_queries as u64);
     }
 
     write_hive_partitioned_parquet(ctx, provider, &output.output, partition_cols).await?;
+
+    // Stop throughput monitor
+    if let Some(handle) = throughput_handle {
+        handle.abort();
+    }
+
+    // Keep throughput_span alive until here
+    drop(throughput_span);
 
     if let Some(span) = &progress_span {
         // Force final progress bar update to 100%

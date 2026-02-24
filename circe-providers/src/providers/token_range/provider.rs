@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
@@ -34,6 +35,7 @@ pub struct ScyllaTokenRangeProvider {
     /// N = nodes * cores_per_node * 3 (max parallel queries)
     concurrency: usize,
     on_range_complete: Option<RangeCompleteCallback>,
+    row_counter: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for ScyllaTokenRangeProvider {
@@ -77,6 +79,10 @@ impl ScyllaTokenRangeProvider {
         self.concurrency * 100
     }
 
+    pub fn row_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.row_counter)
+    }
+
     fn metadata_to_schema(prepared: &PreparedStatement) -> Result<Schema> {
         let col_specs_guard = prepared.get_current_result_set_col_specs();
         let col_specs = col_specs_guard.get();
@@ -118,6 +124,7 @@ impl TableProvider for ScyllaTokenRangeProvider {
             self.prepared_scan.clone(),
             self.concurrency,
             self.num_ranges(),
+            self.row_counter.clone(),
         );
         if let Some(indices) = projection.cloned() {
             exec = exec.with_projection(indices)?;
@@ -227,6 +234,7 @@ impl ScyllaTokenRangeProviderBuilder {
             prepared_scan: Arc::new(prepared_scan),
             concurrency,
             on_range_complete: self.on_range_complete,
+            row_counter: Arc::new(AtomicU64::new(0)),
         })
     }
 }

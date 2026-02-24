@@ -2,6 +2,7 @@ use std::any::Any;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::task::{Context, Poll};
 
 use datafusion::arrow::datatypes::SchemaRef;
@@ -20,12 +21,11 @@ use scylla::client::session::Session as ScyllaSession;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::Row;
 
+use crate::batching::BatchingStream;
+
 /// Callback invoked when a token range query completes.
 /// The argument is the range index.
 pub type RangeCompleteCallback = Arc<dyn Fn(usize) + Send + Sync>;
-
-// Re-export BatchingStream for use by from_query
-pub(in crate::providers) use batching::BatchingStream;
 
 /// A token range within the Murmur3 hash space.
 #[derive(Debug, Clone)]
@@ -79,6 +79,7 @@ pub struct ScyllaTokenRangeExec {
     projection: Option<Vec<usize>>,
     on_range_complete: Option<RangeCompleteCallback>,
     concurrency_per_partition: usize,
+    row_counter: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for ScyllaTokenRangeExec {
@@ -98,10 +99,14 @@ impl ScyllaTokenRangeExec {
         prepared: Arc<PreparedStatement>,
         concurrency: usize,
         num_ranges: usize,
+        row_counter: Arc<AtomicU64>,
     ) -> Self {
         // Use num_cpus for DataFusion partitions, distribute concurrency across them
         let num_partitions = num_cpus::get();
-        let concurrency_per_partition = (concurrency / num_partitions).max(1);
+        // Use ceiling division to ensure we honor the requested concurrency
+        // If concurrency < num_partitions, reduce partitions to match
+        let num_partitions = num_partitions.min(concurrency.max(1));
+        let concurrency_per_partition = concurrency.div_ceil(num_partitions);
 
         let partitioned_ranges = partition_ranges(num_ranges, num_partitions);
 
@@ -130,6 +135,7 @@ impl ScyllaTokenRangeExec {
             projection: None,
             on_range_complete: None,
             concurrency_per_partition,
+            row_counter,
         }
     }
 
@@ -203,6 +209,7 @@ impl ExecutionPlan for ScyllaTokenRangeExec {
         let projection = self.projection.clone();
         let on_range_complete = self.on_range_complete.clone();
         let concurrency = self.concurrency_per_partition;
+        let row_counter = self.row_counter.clone();
 
         tracing::debug!(
             partition,
@@ -232,7 +239,8 @@ impl ExecutionPlan for ScyllaTokenRangeExec {
                 .buffered(concurrency)
                 .try_flatten();
 
-            let batched = BatchingStream::new(Box::pin(row_stream), full_schema, projection);
+            let batched =
+                BatchingStream::new(Box::pin(row_stream), full_schema, projection, row_counter);
             Ok::<_, DataFusionError>(batched)
         })
         .try_flatten();
@@ -269,96 +277,6 @@ async fn query_token_range(
         .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
     Ok(typed_stream.map_err(|e| DataFusionError::External(Box::new(e))))
-}
-
-mod batching {
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-
-    use datafusion::arrow::datatypes::SchemaRef;
-    use datafusion::arrow::record_batch::RecordBatch;
-    use datafusion::error::{DataFusionError, Result};
-    use futures::Stream;
-    use scylla::value::Row;
-
-    use crate::convert::rows_to_record_batch;
-
-    const BATCH_SIZE: usize = 8192;
-
-    /// A stream that accumulates rows into batches of `BATCH_SIZE` and converts
-    /// them to Arrow RecordBatches with optional projection.
-    pub(in crate::providers) struct BatchingStream {
-        inner: Pin<Box<dyn Stream<Item = std::result::Result<Row, DataFusionError>> + Send>>,
-        buffer: Vec<Row>,
-        full_schema: SchemaRef,
-        projection: Option<Vec<usize>>,
-        done: bool,
-    }
-
-    impl BatchingStream {
-        pub(in crate::providers) fn new(
-            inner: Pin<Box<dyn Stream<Item = std::result::Result<Row, DataFusionError>> + Send>>,
-            full_schema: SchemaRef,
-            projection: Option<Vec<usize>>,
-        ) -> Self {
-            Self {
-                inner,
-                buffer: Vec::with_capacity(BATCH_SIZE),
-                full_schema,
-                projection,
-                done: false,
-            }
-        }
-
-        fn flush_buffer(&mut self) -> Result<RecordBatch> {
-            let batch = rows_to_record_batch(&self.buffer, &self.full_schema)?;
-            self.buffer.clear();
-
-            match &self.projection {
-                Some(indices) => batch
-                    .project(indices)
-                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None)),
-                None => Ok(batch),
-            }
-        }
-    }
-
-    impl Stream for BatchingStream {
-        type Item = Result<RecordBatch>;
-
-        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            let this = self.get_mut();
-
-            if this.done {
-                return Poll::Ready(None);
-            }
-
-            loop {
-                match this.inner.as_mut().poll_next(cx) {
-                    Poll::Ready(Some(Ok(row))) => {
-                        this.buffer.push(row);
-                        if this.buffer.len() >= BATCH_SIZE {
-                            return Poll::Ready(Some(this.flush_buffer()));
-                        }
-                    }
-                    Poll::Ready(Some(Err(e))) => {
-                        this.done = true;
-                        return Poll::Ready(Some(Err(e)));
-                    }
-                    Poll::Ready(None) => {
-                        this.done = true;
-                        if this.buffer.is_empty() {
-                            return Poll::Ready(None);
-                        }
-                        return Poll::Ready(Some(this.flush_buffer()));
-                    }
-                    Poll::Pending => {
-                        return Poll::Pending;
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// A stream wrapper that invokes a callback when the inner stream ends.

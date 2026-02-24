@@ -1,3 +1,4 @@
+pub mod batching;
 pub mod convert;
 pub mod error;
 pub mod providers;

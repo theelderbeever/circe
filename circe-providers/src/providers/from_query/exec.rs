@@ -2,6 +2,7 @@ use std::any::Any;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::task::{Context, Poll};
 
 use datafusion::arrow::datatypes::SchemaRef;
@@ -19,7 +20,7 @@ use scylla::client::session::Session as ScyllaSession;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::{CqlValue, Row};
 
-use super::super::token_range::exec::BatchingStream;
+use crate::batching::BatchingStream;
 
 /// Callback invoked when a query completes.
 /// The argument is the query index within its partition.
@@ -36,6 +37,7 @@ pub struct ScyllaFromQueryExec {
     projection: Option<Vec<usize>>,
     concurrency_per_partition: usize,
     on_query_complete: Option<QueryCompleteCallback>,
+    row_counter: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for ScyllaFromQueryExec {
@@ -102,6 +104,7 @@ impl ScyllaFromQueryExec {
         prepared: Arc<PreparedStatement>,
         param_sets: Vec<Vec<CqlValue>>,
         max_concurrency: usize,
+        row_counter: Arc<AtomicU64>,
     ) -> Self {
         let (num_partitions, concurrency_per_partition) =
             Self::effective_concurrency(param_sets.len(), max_concurrency);
@@ -147,6 +150,7 @@ impl ScyllaFromQueryExec {
             projection: None,
             concurrency_per_partition,
             on_query_complete: None,
+            row_counter,
         }
     }
 
@@ -220,6 +224,7 @@ impl ExecutionPlan for ScyllaFromQueryExec {
         let param_sets = self.partitioned_param_sets[partition].clone();
         let concurrency = self.concurrency_per_partition;
         let on_query_complete = self.on_query_complete.clone();
+        let row_counter = self.row_counter.clone();
 
         tracing::debug!(
             partition,
@@ -247,7 +252,8 @@ impl ExecutionPlan for ScyllaFromQueryExec {
                 .buffered(concurrency)
                 .try_flatten();
 
-            let batched = BatchingStream::new(Box::pin(row_stream), full_schema, projection);
+            let batched =
+                BatchingStream::new(Box::pin(row_stream), full_schema, projection, row_counter);
             Ok::<_, DataFusionError>(batched)
         })
         .try_flatten();

@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
@@ -31,6 +32,7 @@ pub struct ScyllaFromQueryProvider {
     param_sets: Vec<Vec<CqlValue>>,
     max_concurrency: Option<usize>,
     on_query_complete: Option<QueryCompleteCallback>,
+    row_counter: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for ScyllaFromQueryProvider {
@@ -62,6 +64,10 @@ impl ScyllaFromQueryProvider {
         } else {
             self.param_sets.len()
         }
+    }
+
+    pub fn row_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.row_counter)
     }
 
     fn metadata_to_schema(prepared: &PreparedStatement) -> Result<Schema> {
@@ -108,6 +114,7 @@ impl TableProvider for ScyllaFromQueryProvider {
             self.prepared.clone(),
             self.param_sets.clone(),
             max_concurrency,
+            self.row_counter.clone(),
         );
         if let Some(cb) = &self.on_query_complete {
             exec = exec.with_on_query_complete(cb.clone());
@@ -187,6 +194,7 @@ impl ScyllaFromQueryProviderBuilder {
             param_sets: self.param_sets,
             max_concurrency: self.max_concurrency,
             on_query_complete: self.on_query_complete,
+            row_counter: Arc::new(AtomicU64::new(0)),
         })
     }
 }
