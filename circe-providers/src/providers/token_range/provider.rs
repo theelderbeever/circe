@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::Session as DfSession;
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::TableType;
@@ -12,30 +12,28 @@ use datafusion::error::{DataFusionError, Result};
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
 use scylla::client::session::Session as ScyllaSession;
-use scylla::statement::prepared::PreparedStatement;
+use scylla::value::CqlValue;
 
-use crate::convert::scylla_type_to_arrow;
-use crate::error::ScyllaProviderError;
+use crate::providers::from_query::{QueryCompleteCallback, ScyllaFromQueryProvider};
 
-use super::exec::{RangeCompleteCallback, ScyllaTokenRangeExec};
+use super::range::TokenRange;
+
+/// Callback invoked when a token range query completes.
+/// The argument is the range index.
+pub type RangeCompleteCallback = Arc<dyn Fn(usize) + Send + Sync>;
 
 /// A DataFusion TableProvider that reads from ScyllaDB using token range scans.
 ///
-/// Divides the full Murmur3 token range into sub-ranges and executes concurrent
-/// `SELECT * FROM <ks>.<table> WHERE TOKEN(...) >= ? AND TOKEN(...) < ? BYPASS CACHE`
-/// queries to perform a full table scan.
+/// Splits the Murmur3 token space into `concurrency` equal ranges and executes
+/// them as concurrent `SELECT ... WHERE TOKEN(...) >= ? AND TOKEN(...) < ? BYPASS CACHE`
+/// queries via [`ScyllaFromQueryProvider`].
 #[derive(Clone)]
 pub struct ScyllaTokenRangeProvider {
-    session: Arc<ScyllaSession>,
+    inner: ScyllaFromQueryProvider,
     keyspace: String,
     table: String,
-    schema: SchemaRef,
     partition_key_columns: Vec<String>,
-    prepared_scan: Arc<PreparedStatement>,
-    /// N = nodes * cores_per_node * 3 (max parallel queries)
     concurrency: usize,
-    on_range_complete: Option<RangeCompleteCallback>,
-    row_counter: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for ScyllaTokenRangeProvider {
@@ -45,7 +43,6 @@ impl fmt::Debug for ScyllaTokenRangeProvider {
             .field("table", &self.table)
             .field("partition_key_columns", &self.partition_key_columns)
             .field("concurrency", &self.concurrency)
-            .field("has_on_range_complete", &self.on_range_complete.is_some())
             .finish()
     }
 }
@@ -76,24 +73,11 @@ impl ScyllaTokenRangeProvider {
     }
 
     pub fn num_ranges(&self) -> usize {
-        self.concurrency * 100
+        self.concurrency
     }
 
     pub fn row_counter(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.row_counter)
-    }
-
-    fn metadata_to_schema(prepared: &PreparedStatement) -> Result<Schema> {
-        let col_specs_guard = prepared.get_current_result_set_col_specs();
-        let col_specs = col_specs_guard.get();
-        let fields: Vec<Field> = col_specs
-            .iter()
-            .map(|col_spec| {
-                let arrow_type = scylla_type_to_arrow(col_spec.typ())?;
-                Ok(Field::new(col_spec.name(), arrow_type, true))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Schema::new(fields))
+        self.inner.row_counter()
     }
 }
 
@@ -104,7 +88,7 @@ impl TableProvider for ScyllaTokenRangeProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        Arc::clone(&self.schema)
+        self.inner.schema()
     }
 
     fn table_type(&self) -> TableType {
@@ -113,26 +97,12 @@ impl TableProvider for ScyllaTokenRangeProvider {
 
     async fn scan(
         &self,
-        _state: &dyn DfSession,
+        state: &dyn DfSession,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        _limit: Option<usize>,
+        filters: &[Expr],
+        limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let mut exec = ScyllaTokenRangeExec::new(
-            self.session.clone(),
-            self.schema.clone(),
-            self.prepared_scan.clone(),
-            self.concurrency,
-            self.num_ranges(),
-            self.row_counter.clone(),
-        );
-        if let Some(indices) = projection.cloned() {
-            exec = exec.with_projection(indices)?;
-        }
-        if let Some(cb) = &self.on_range_complete {
-            exec = exec.with_on_range_complete(Arc::clone(cb));
-        }
-        Ok(Arc::new(exec))
+        self.inner.scan(state, projection, filters, limit).await
     }
 }
 
@@ -144,8 +114,6 @@ pub struct ScyllaTokenRangeProviderBuilder {
     partition_key_columns: Option<Vec<String>>,
     columns: Vec<String>,
     concurrency: Option<usize>,
-    nodes: Option<usize>,
-    cores_per_node: Option<usize>,
     on_range_complete: Option<RangeCompleteCallback>,
 }
 
@@ -158,8 +126,6 @@ impl ScyllaTokenRangeProviderBuilder {
             partition_key_columns: None,
             columns: vec!["*".to_owned()],
             concurrency: None,
-            nodes: None,
-            cores_per_node: None,
             on_range_complete: None,
         }
     }
@@ -175,19 +141,10 @@ impl ScyllaTokenRangeProviderBuilder {
         self
     }
 
-    /// Set the max concurrent queries directly, overriding the nodes * cores * 3 formula.
+    /// Set the number of token range splits and max concurrent queries.
+    /// The token space is divided into exactly `concurrency` ranges.
     pub fn concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = Some(concurrency);
-        self
-    }
-
-    pub fn nodes(mut self, nodes: usize) -> Self {
-        self.nodes = Some(nodes);
-        self
-    }
-
-    pub fn cores_per_node(mut self, cores: usize) -> Self {
-        self.cores_per_node = Some(cores);
         self
     }
 
@@ -201,6 +158,10 @@ impl ScyllaTokenRangeProviderBuilder {
             DataFusionError::Configuration("partition_key_columns must be set".into())
         })?;
 
+        let concurrency = self
+            .concurrency
+            .ok_or_else(|| DataFusionError::Configuration("concurrency must be set".into()))?;
+
         let pk_cols_csv = partition_key_columns.join(", ");
         let select_cols = self.columns.join(", ");
         let scan_query = format!(
@@ -208,33 +169,27 @@ impl ScyllaTokenRangeProviderBuilder {
             self.keyspace, self.table,
         );
 
-        let prepared_scan = self
-            .session
-            .prepare(scan_query)
-            .await
-            .map_err(ScyllaProviderError::Prepare)?;
+        let param_sets: Vec<Vec<CqlValue>> = TokenRange::split(concurrency)
+            .map(|r| vec![CqlValue::BigInt(r.start), CqlValue::BigInt(r.end)])
+            .collect();
 
-        let schema = ScyllaTokenRangeProvider::metadata_to_schema(&prepared_scan)?;
+        let mut from_query_builder = ScyllaFromQueryProvider::builder(self.session, scan_query)
+            .param_sets(param_sets)
+            .max_concurrency(concurrency);
 
-        // Concurrency resolution: explicit > nodes*cores*3 > default(4)
-        let concurrency = if let Some(c) = self.concurrency {
-            c
-        } else {
-            match (self.nodes, self.cores_per_node) {
-                (Some(nodes), Some(cores)) => nodes * cores * 3,
-                _ => 4,
-            }
-        };
+        if let Some(cb) = self.on_range_complete {
+            let callback: QueryCompleteCallback = cb;
+            from_query_builder = from_query_builder.on_query_complete(callback);
+        }
+
+        let inner = from_query_builder.build().await?;
+
         Ok(ScyllaTokenRangeProvider {
-            session: self.session,
+            inner,
             keyspace: self.keyspace,
             table: self.table,
-            schema: Arc::new(schema),
             partition_key_columns,
-            prepared_scan: Arc::new(prepared_scan),
             concurrency,
-            on_range_complete: self.on_range_complete,
-            row_counter: Arc::new(AtomicU64::new(0)),
         })
     }
 }
@@ -245,8 +200,7 @@ impl fmt::Debug for ScyllaTokenRangeProviderBuilder {
             .field("keyspace", &self.keyspace)
             .field("table", &self.table)
             .field("partition_key_columns", &self.partition_key_columns)
-            .field("nodes", &self.nodes)
-            .field("cores_per_node", &self.cores_per_node)
+            .field("concurrency", &self.concurrency)
             .finish()
     }
 }

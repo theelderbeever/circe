@@ -110,8 +110,7 @@ async fn test_token_range_scan_to_hive_parquet() {
     let provider =
         ScyllaTokenRangeProvider::builder(session, "test_ks".into(), "test_export".into())
             .partition_key_columns(vec!["region".into()])
-            .nodes(1)
-            .cores_per_node(1)
+            .concurrency(4)
             .build()
             .await
             .expect("Failed to build provider");

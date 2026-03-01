@@ -89,17 +89,9 @@ pub struct TokenRangeArgs {
     #[arg(long, value_delimiter = ',', default_value = "*")]
     pub columns: Vec<String>,
 
-    /// Max concurrent queries to Scylla (overrides --node-count / -k calculation)
-    #[arg(short = 'C', long)]
-    pub max_concurrency: Option<usize>,
-
-    /// Number of nodes in the ScyllaDB cluster. Max concurrency is calculated based on node count and cores per node.
-    #[arg(short = 'N', long, default_value = "1")]
-    pub node_count: usize,
-
-    /// CPU cores per node. Max concurrency is calculated based on node count and cores per node.
-    #[arg(short = 'k', long, default_value_t = num_cpus::get())]
-    pub cores_per_node: usize,
+    /// Number of token range splits and max concurrent queries (defaults to 2 * num_cpus)
+    #[arg(short = 'C', long, default_value_t = num_cpus::get() * 2)]
+    pub concurrency: usize,
 }
 
 #[derive(Debug, Args)]
@@ -168,7 +160,7 @@ impl Cli {
         let throughput_span = tracing::info_span!(parent: &tracing::Span::current(), "throughput");
         throughput_span.pb_set_style(
             &ProgressStyle::with_template("Throughput: {msg} rows/sec (total: {human_pos} rows)")
-                .expect("valid progress bar template"),
+                .unwrap_or_else(|_| ProgressStyle::default_bar()),
         );
 
         // Initialize the display
@@ -266,18 +258,11 @@ async fn run_token_range(
         .split_once('.')
         .context("--table must be in the form {keyspace}.{table}")?;
 
-    let mut builder =
+    let builder =
         ScyllaTokenRangeProvider::builder(session, keyspace.to_owned(), table.to_owned())
             .partition_key_columns(args.partition_keys)
-            .columns(args.columns);
-
-    if let Some(c) = args.max_concurrency {
-        builder = builder.concurrency(c);
-    } else {
-        builder = builder
-            .nodes(args.node_count)
-            .cores_per_node(args.cores_per_node);
-    }
+            .columns(args.columns)
+            .concurrency(args.concurrency);
 
     // Set up progress bar styling if interactive
     let (progress_span, builder) = Cli::setup_progress_bar(interactive, builder, |b, callback| {

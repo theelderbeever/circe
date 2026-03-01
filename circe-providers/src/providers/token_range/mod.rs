@@ -1,5 +1,7 @@
-pub(crate) mod exec;
 mod provider;
+mod range;
 
-pub use exec::TokenRange;
-pub use provider::{ScyllaTokenRangeProvider, ScyllaTokenRangeProviderBuilder};
+pub use provider::{
+    RangeCompleteCallback, ScyllaTokenRangeProvider, ScyllaTokenRangeProviderBuilder,
+};
+pub use range::TokenRange;
