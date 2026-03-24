@@ -5,7 +5,7 @@ use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::error::Result;
 use datafusion::prelude::SessionContext;
 
-use crate::providers::token_range::ScyllaTokenRangeProvider;
+// use crate::providers::token_range::ScyllaTokenRangeProvider;
 
 /// Reads from a TableProvider and writes hive-partitioned Parquet files.
 ///
@@ -42,13 +42,13 @@ where
     Ok(())
 }
 
-/// Convenience function that writes using the provider's partition key columns
-/// for hive partitioning.
-pub async fn write_scylla_to_parquet(
-    ctx: &SessionContext,
-    provider: Arc<ScyllaTokenRangeProvider>,
-    output_url: &str,
-) -> Result<()> {
-    let partition_cols = provider.partition_key_columns().to_vec();
-    write_hive_partitioned_parquet(ctx, provider, output_url, partition_cols).await
-}
+// /// Convenience function that writes using the provider's partition key columns
+// /// for hive partitioning.
+// pub async fn write_scylla_to_parquet(
+//     ctx: &SessionContext,
+//     provider: Arc<ScyllaTokenRangeProvider>,
+//     output_url: &str,
+// ) -> Result<()> {
+//     let partition_cols = provider.partition_key_columns().to_vec();
+//     write_hive_partitioned_parquet(ctx, provider, output_url, partition_cols).await
+// }

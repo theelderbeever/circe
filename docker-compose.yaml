@@ -1,49 +1,25 @@
 services:
-  scylla1:
-    container_name: scylla1
+  scylla:
     image: scylladb/scylla:6.1.2
-    restart: always
-    command: --seeds=scylla1,scylla2 --reactor-backend=epoll --smp 1 --memory 750M --overprovisioned 1 --api-address 0.0.0.0
+    restart: unless-stopped
+    command: >
+      --smp 4
+      --memory 8G
+      --overprovisioned 1
+      --api-address 0.0.0.0
+      --broadcast-rpc-address 127.0.0.1
     ports:
-      - "9042:9042"
-      - "19042:19042"
-
-  scylla2:
-    container_name: scylla2
-    image: scylladb/scylla:6.1.2
-    restart: always
-    command: --seeds=scylla1,scylla2 --reactor-backend=epoll --smp 1 --memory 750M --overprovisioned 1 --api-address 0.0.0.0
-    ports:
-      - "9043:9042"
-
-  scylla3:
-    container_name: scylla3
-    image: scylladb/scylla:6.1.2
-    restart: always
-    command: --seeds=scylla1,scylla2 --reactor-backend=epoll --smp 1 --memory 750M --overprovisioned 1 --api-address 0.0.0.0
-    ports:
-      - "9044:9042"
-
-  rustfs:
-    image: rustfs/rustfs:latest
-    container_name: rustfs
-    ports:
-      - "19000:9000" # S3 API
-      - "19001:9001" # Web Console
-    environment:
-      RUSTFS_ACCESS_KEY: admin
-      RUSTFS_SECRET_KEY: password
+      - "9042:9042" # CQL native transport
+      - "19042:19042" # Shard-aware port
+      - "10000:10000" # REST API (useful for inspecting state)
     volumes:
-      - rustfs-data:/data
-    command: ["--address", ":9000", "--console-address", ":9001", "/data"]
+      - scylla-data:/var/lib/scylla
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
+      test: ["CMD-SHELL", "cqlsh -e 'SELECT now() FROM system.local'"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 10
+      start_period: 30s
 
 volumes:
-  scylla:
-  scylla-mutant:
-  rustfs-data:
+  scylla-data:

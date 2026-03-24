@@ -12,8 +12,8 @@ use scylla::frame::response::result::{CollectionType, ColumnType, NativeType};
 use scylla::value::{CqlValue, Row};
 
 /// Converts a Scylla CQL column type to an Arrow DataType.
-pub fn scylla_type_to_arrow(scylla_type: &ColumnType) -> Result<DataType> {
-    match scylla_type {
+pub fn to_arrow(coltype: &ColumnType) -> Result<DataType> {
+    match coltype {
         ColumnType::Native(native) => match native {
             NativeType::Int => Ok(DataType::Int32),
             NativeType::BigInt | NativeType::Counter => Ok(DataType::Int64),
@@ -42,14 +42,14 @@ pub fn scylla_type_to_arrow(scylla_type: &ColumnType) -> Result<DataType> {
         },
         ColumnType::Collection { frozen: _, typ } => match typ {
             CollectionType::List(inner) | CollectionType::Set(inner) => {
-                let inner_type = scylla_type_to_arrow(inner)?;
+                let inner_type = to_arrow(inner)?;
                 Ok(DataType::List(Arc::new(Field::new(
                     "item", inner_type, true,
                 ))))
             }
             CollectionType::Map(key_type, value_type) => {
-                let key = scylla_type_to_arrow(key_type)?;
-                let value = scylla_type_to_arrow(value_type)?;
+                let key = to_arrow(key_type)?;
+                let value = to_arrow(value_type)?;
                 Ok(DataType::Map(
                     Arc::new(Field::new(
                         "entries",
@@ -71,7 +71,7 @@ pub fn scylla_type_to_arrow(scylla_type: &ColumnType) -> Result<DataType> {
         },
         _ => Err(DataFusionError::NotImplemented(format!(
             "Unsupported Scylla type: {:?}",
-            scylla_type
+            coltype
         ))),
     }
 }

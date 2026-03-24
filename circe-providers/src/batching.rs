@@ -1,11 +1,11 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result};
+use datafusion::physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
 use futures::Stream;
 use scylla::value::Row;
 
@@ -25,7 +25,6 @@ pub struct BatchingStream {
     full_schema: SchemaRef,
     projection: Option<Vec<usize>>,
     done: bool,
-    row_counter: Arc<AtomicU64>,
     batch_size: usize,
 }
 
@@ -35,15 +34,8 @@ impl BatchingStream {
         inner: Pin<Box<dyn Stream<Item = std::result::Result<Row, DataFusionError>> + Send>>,
         full_schema: SchemaRef,
         projection: Option<Vec<usize>>,
-        row_counter: Arc<AtomicU64>,
     ) -> Self {
-        Self::with_batch_size(
-            inner,
-            full_schema,
-            projection,
-            row_counter,
-            DEFAULT_BATCH_SIZE,
-        )
+        Self::with_batch_size(inner, full_schema, projection, DEFAULT_BATCH_SIZE)
     }
 
     /// Creates a new batching stream with a custom batch size.
@@ -51,7 +43,6 @@ impl BatchingStream {
         inner: Pin<Box<dyn Stream<Item = std::result::Result<Row, DataFusionError>> + Send>>,
         full_schema: SchemaRef,
         projection: Option<Vec<usize>>,
-        row_counter: Arc<AtomicU64>,
         batch_size: usize,
     ) -> Self {
         Self {
@@ -60,7 +51,6 @@ impl BatchingStream {
             full_schema,
             projection,
             done: false,
-            row_counter,
             batch_size,
         }
     }
@@ -68,8 +58,7 @@ impl BatchingStream {
     fn flush_buffer(&mut self) -> Result<RecordBatch> {
         let batch = rows_to_record_batch(&self.buffer, &self.full_schema)?;
         // Increment row counter once per batch (efficient)
-        self.row_counter
-            .fetch_add(self.buffer.len() as u64, Ordering::Relaxed);
+
         self.buffer.clear();
 
         match &self.projection {
@@ -115,5 +104,24 @@ impl Stream for BatchingStream {
                 }
             }
         }
+    }
+}
+
+impl TryInto<SendableRecordBatchStream> for BatchingStream {
+    type Error = DataFusionError;
+    fn try_into(
+        self: BatchingStream,
+    ) -> std::result::Result<SendableRecordBatchStream, Self::Error> {
+        let schema = match &self.projection {
+            Some(indices) => self
+                .full_schema
+                .clone()
+                .project(indices)
+                .map(Arc::new)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None)),
+            None => Ok(self.full_schema.clone()),
+        }?;
+
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, self)))
     }
 }

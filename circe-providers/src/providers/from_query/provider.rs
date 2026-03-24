@@ -1,7 +1,6 @@
 use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
@@ -15,7 +14,7 @@ use scylla::client::session::Session as ScyllaSession;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::value::CqlValue;
 
-use crate::convert::scylla_type_to_arrow;
+use crate::convert::to_arrow;
 use crate::error::ScyllaProviderError;
 
 use super::exec::{QueryCompleteCallback, ScyllaFromQueryExec};
@@ -30,9 +29,8 @@ pub struct ScyllaFromQueryProvider {
     schema: SchemaRef,
     prepared: Arc<PreparedStatement>,
     param_sets: Vec<Vec<CqlValue>>,
-    max_concurrency: Option<usize>,
+    max_concurrency: usize,
     on_query_complete: Option<QueryCompleteCallback>,
-    row_counter: Arc<AtomicU64>,
 }
 
 impl fmt::Debug for ScyllaFromQueryProvider {
@@ -48,26 +46,8 @@ impl ScyllaFromQueryProvider {
         ScyllaFromQueryProviderBuilder::new(session, query)
     }
 
-    pub fn num_partitions(&self) -> usize {
-        if self.param_sets.is_empty() {
-            1
-        } else {
-            let default_max = num_cpus::get() * 10;
-            let max_concurrency = self.max_concurrency.unwrap_or(default_max);
-            self.param_sets.len().min(max_concurrency)
-        }
-    }
-
     pub fn num_queries(&self) -> usize {
-        if self.param_sets.is_empty() {
-            1
-        } else {
-            self.param_sets.len()
-        }
-    }
-
-    pub fn row_counter(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.row_counter)
+        self.param_sets.len().max(1)
     }
 
     fn metadata_to_schema(prepared: &PreparedStatement) -> Result<Schema> {
@@ -76,7 +56,7 @@ impl ScyllaFromQueryProvider {
         let fields: Vec<Field> = col_specs
             .iter()
             .map(|col_spec| {
-                let arrow_type = scylla_type_to_arrow(col_spec.typ())?;
+                let arrow_type = to_arrow(col_spec.typ())?;
                 Ok(Field::new(col_spec.name(), arrow_type, true))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -100,21 +80,18 @@ impl TableProvider for ScyllaFromQueryProvider {
 
     async fn scan(
         &self,
-        _state: &dyn DfSession,
+        state: &dyn DfSession,
         projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let default_max = num_cpus::get() * 10;
-        let max_concurrency = self.max_concurrency.unwrap_or(default_max);
-
         let mut exec = ScyllaFromQueryExec::new(
             self.session.clone(),
             self.schema.clone(),
             self.prepared.clone(),
             self.param_sets.clone(),
-            max_concurrency,
-            self.row_counter.clone(),
+            state.config().target_partitions(),
+            self.max_concurrency.clamp(1, self.param_sets.len()),
         );
         if let Some(cb) = &self.on_query_complete {
             exec = exec.with_on_query_complete(cb.clone());
@@ -130,11 +107,9 @@ impl TableProvider for ScyllaFromQueryProvider {
 pub struct ScyllaFromQueryProviderBuilder {
     session: Arc<ScyllaSession>,
     query: String,
-    param_sets: Vec<Vec<CqlValue>>,
+    params: Vec<Vec<CqlValue>>,
     max_concurrency: Option<usize>,
     on_query_complete: Option<QueryCompleteCallback>,
-    prepared: Option<Arc<PreparedStatement>>,
-    schema: Option<SchemaRef>,
 }
 
 impl ScyllaFromQueryProviderBuilder {
@@ -142,59 +117,53 @@ impl ScyllaFromQueryProviderBuilder {
         Self {
             session,
             query,
-            param_sets: vec![],
+            params: vec![],
             max_concurrency: None,
             on_query_complete: None,
-            prepared: None,
-            schema: None,
         }
     }
 
-    pub fn param_sets(mut self, sets: Vec<Vec<CqlValue>>) -> Self {
-        self.param_sets = sets;
+    pub fn with_params(mut self, params: Vec<CqlValue>) -> Self {
+        self.params.push(params);
         self
     }
 
     /// Sets the maximum total concurrency across all partitions.
     ///
-    /// Defaults to `num_cpus * 10` if not specified.
-    ///
     /// This caps the total number of concurrent queries to Scylla, useful on
     /// systems with many CPUs where the default would be too high.
-    pub fn max_concurrency(mut self, max: usize) -> Self {
+    pub fn with_max_concurrency(mut self, max: usize) -> Self {
         self.max_concurrency = Some(max);
         self
     }
 
+    /// A callback to run upon the completion of a query/parameter set
     pub fn on_query_complete(mut self, cb: QueryCompleteCallback) -> Self {
         self.on_query_complete = Some(cb);
         self
     }
 
-    pub fn prepared(&self) -> Option<&PreparedStatement> {
-        self.prepared.as_deref()
-    }
+    pub async fn build(self) -> Result<ScyllaFromQueryProvider> {
+        // If not provided limit the concurrency to the minimum between the number of cpus
+        // or the quantity of parameter sets. At least 1.
+        let max_concurrency = self.max_concurrency.unwrap_or(self.params.len()).max(1);
 
-    pub async fn build(mut self) -> Result<ScyllaFromQueryProvider> {
-        let prepared = self
-            .session
-            .prepare(self.query.as_str())
-            .await
-            .map_err(ScyllaProviderError::Prepare)?;
+        let prepared = Arc::new(
+            self.session
+                .prepare(self.query.as_str())
+                .await
+                .map_err(ScyllaProviderError::Prepare)?,
+        );
 
-        let schema = ScyllaFromQueryProvider::metadata_to_schema(&prepared)?;
-        self.prepared = Some(Arc::new(prepared.clone()));
-        self.schema = Some(Arc::new(schema));
+        let schema = Arc::new(ScyllaFromQueryProvider::metadata_to_schema(&prepared)?);
 
-        #[allow(clippy::unwrap_used)]
         Ok(ScyllaFromQueryProvider {
             session: self.session,
-            schema: self.schema.unwrap(),
-            prepared: self.prepared.unwrap(),
-            param_sets: self.param_sets,
-            max_concurrency: self.max_concurrency,
+            schema,
+            prepared,
+            param_sets: self.params,
+            max_concurrency,
             on_query_complete: self.on_query_complete,
-            row_counter: Arc::new(AtomicU64::new(0)),
         })
     }
 }
@@ -203,7 +172,7 @@ impl fmt::Debug for ScyllaFromQueryProviderBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ScyllaFromQueryProviderBuilder")
             .field("query", &self.query)
-            .field("param_sets_count", &self.param_sets.len())
+            .field("param_sets_count", &self.params.len())
             .finish()
     }
 }
