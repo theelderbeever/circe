@@ -17,6 +17,7 @@ tracing-indicatif = { workspace = true }
 indicatif = { workspace = true }
 url = { workspace = true }
 anyhow = "1"
+serde_json = "1"
 num_cpus = { workspace = true }
 chrono = { workspace = true }
 hex = "0.4"

@@ -10,8 +10,8 @@ use datafusion::{
     physical_plan::ExecutionPlan,
 };
 use scylla::{
-    client::session::Session as ScyllaSession, statement::prepared::PreparedStatement,
-    value::CqlValue,
+    client::session::Session as ScyllaSession, serialize::row::SerializeRow,
+    statement::prepared::PreparedStatement,
 };
 
 use crate::{convert::to_arrow, error::ScyllaProviderError};
@@ -23,16 +23,16 @@ use super::exec::{QueryCompleteCallback, ScyllaExec};
 /// Supports parameterized queries with multiple parameter sets for concurrent execution.
 /// Each parameter set creates one partition, allowing DataFusion to execute queries in parallel.
 #[derive(Clone)]
-pub struct ScyllaProvider {
+pub struct ScyllaProvider<P = ()> {
     session: Arc<ScyllaSession>,
     schema: SchemaRef,
     prepared: Arc<PreparedStatement>,
-    param_sets: Vec<Vec<CqlValue>>,
+    param_sets: Vec<P>,
     max_concurrency: usize,
     on_query_complete: Option<QueryCompleteCallback>,
 }
 
-impl fmt::Debug for ScyllaProvider {
+impl<P> fmt::Debug for ScyllaProvider<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ScyllaProvider")
             .field("param_sets_count", &self.param_sets.len())
@@ -40,8 +40,8 @@ impl fmt::Debug for ScyllaProvider {
     }
 }
 
-impl ScyllaProvider {
-    pub fn builder(session: Arc<ScyllaSession>, query: String) -> ScyllaProviderBuilder {
+impl<P: SerializeRow + Clone + Send + Sync + 'static> ScyllaProvider<P> {
+    pub fn builder(session: Arc<ScyllaSession>, query: String) -> ScyllaProviderBuilder<P> {
         ScyllaProviderBuilder::new(session, query)
     }
 
@@ -64,7 +64,7 @@ impl ScyllaProvider {
 }
 
 #[async_trait]
-impl TableProvider for ScyllaProvider {
+impl<P: SerializeRow + Clone + Send + Sync + 'static> TableProvider for ScyllaProvider<P> {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -103,15 +103,15 @@ impl TableProvider for ScyllaProvider {
 }
 
 /// Builder for constructing a [`ScyllaProvider`].
-pub struct ScyllaProviderBuilder {
+pub struct ScyllaProviderBuilder<P = ()> {
     session: Arc<ScyllaSession>,
     query: String,
-    params: Vec<Vec<CqlValue>>,
+    params: Vec<P>,
     max_concurrency: Option<usize>,
     on_query_complete: Option<QueryCompleteCallback>,
 }
 
-impl ScyllaProviderBuilder {
+impl<P: SerializeRow + Clone + Send + Sync + 'static> ScyllaProviderBuilder<P> {
     fn new(session: Arc<ScyllaSession>, query: String) -> Self {
         Self {
             session,
@@ -122,7 +122,7 @@ impl ScyllaProviderBuilder {
         }
     }
 
-    pub fn with_params(mut self, params: Vec<CqlValue>) -> Self {
+    pub fn with_params(mut self, params: P) -> Self {
         self.params.push(params);
         self
     }
@@ -142,9 +142,7 @@ impl ScyllaProviderBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<ScyllaProvider> {
-        // If not provided limit the concurrency to the minimum between the number of cpus
-        // or the quantity of parameter sets. At least 1.
+    pub async fn build(self) -> Result<ScyllaProvider<P>> {
         let max_concurrency = self.max_concurrency.unwrap_or(self.params.len()).max(1);
 
         let prepared = Arc::new(
@@ -154,7 +152,7 @@ impl ScyllaProviderBuilder {
                 .map_err(ScyllaProviderError::Prepare)?,
         );
 
-        let schema = Arc::new(ScyllaProvider::metadata_to_schema(&prepared)?);
+        let schema = Arc::new(ScyllaProvider::<P>::metadata_to_schema(&prepared)?);
 
         Ok(ScyllaProvider {
             session: self.session,
@@ -167,7 +165,7 @@ impl ScyllaProviderBuilder {
     }
 }
 
-impl fmt::Debug for ScyllaProviderBuilder {
+impl<P> fmt::Debug for ScyllaProviderBuilder<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ScyllaProviderBuilder")
             .field("query", &self.query)

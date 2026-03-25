@@ -37,18 +37,18 @@ pub struct Cli {
 pub struct ScyllaArgs {
     /// ScyllaDB contact points (comma-separated)
     #[arg(
-        env = "SCYLLA_KNOWN_NODES",
+        env = "CIRCE_KNOWN_NODES",
         default_value = "127.0.0.1:9042",
         value_delimiter = ','
     )]
     pub known_nodes: Vec<String>,
 
     /// ScyllaDB username
-    #[arg(long, env = "SCYLLA_USER")]
+    #[arg(long, env = "CIRCE_USER")]
     pub scylla_user: Option<String>,
 
     /// ScyllaDB password
-    #[arg(long, env = "SCYLLA_PASSWORD")]
+    #[arg(long, env = "CIRCE_PASSWORD")]
     pub scylla_password: Option<String>,
 }
 
@@ -121,21 +121,11 @@ pub struct QueryArgs {
     /// The CQL query to execute
     pub query: String,
 
-    /// CSV-delimited parameters for ? placeholders in query.
-    /// Can be repeated multiple times for concurrent execution.
-    /// Example: --params "value1,value2" --params "value3,value4"
-    /// This creates 2 partitions executing the query concurrently.
-    #[arg(long, conflicts_with = "params_file")]
-    pub params: Option<Vec<String>>,
-
-    /// File containing parameter sets, one set per line (CSV format).
+    /// NDJson file containing an object per line for params.
+    /// Only named params are supported. ie: value = :name
     /// Enables concurrent execution with many parameter sets.
-    /// Example file content:
-    ///   us-east,25
-    ///   us-west,30
-    ///   eu-west,35
-    #[arg(long, conflicts_with = "params")]
-    pub params_file: Option<PathBuf>,
+    #[arg(long)]
+    pub params: Option<PathBuf>,
 
     /// Max concurrent queries to Scylla (defaults to num_cpus * 10)
     #[arg(short = 'C', long)]
@@ -313,35 +303,19 @@ async fn run_from_query(
 ) -> anyhow::Result<()> {
     tracing::info!(query = %args.query, output = %output.output, "Starting from-query");
 
-    // Parse parameter sets from either --params or --params-file
-    let raw_param_sets = if let Some(params_file) = args.params_file {
-        tracing::debug!(file = %params_file.display(), "Loading parameters from file");
-        params::parse_params_from_file(&params_file)?
-    } else if let Some(params) = args.params {
-        params::parse_params_from_args(Some(params))
-    } else {
-        vec![] // No parameters
-    };
-
     // Prepare the statement first to get metadata for parameter conversion
     let prepared = session
         .prepare(args.query.as_str())
         .await
         .context("Failed to prepare CQL query")?;
 
-    // Convert parameter sets if provided
-    let param_sets = if !raw_param_sets.is_empty() {
-        tracing::debug!(count = raw_param_sets.len(), "Converting parameter sets");
-        params::convert_all_param_sets(raw_param_sets, &prepared)?
-    } else {
-        vec![]
-    };
-
-    // Build provider with converted parameters
     let mut builder = ScyllaProvider::builder(session, args.query);
-    if !param_sets.is_empty() {
-        for params in param_sets {
-            builder = builder.with_params(params);
+
+    if let Some(params_file) = args.params {
+        let raw = params::parse_params_from_file(&params_file)?;
+        tracing::debug!(count = raw.len(), "Converting parameter sets");
+        for param_set in params::convert_param_sets(raw, &prepared)? {
+            builder = builder.with_params(param_set);
         }
     }
     if let Some(max_concurrency) = args.max_concurrency {

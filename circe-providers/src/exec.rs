@@ -20,9 +20,8 @@ use datafusion::{
 };
 use futures::{Stream, StreamExt, TryStreamExt};
 use scylla::{
-    client::session::Session as ScyllaSession,
-    statement::prepared::PreparedStatement,
-    value::{CqlValue, Row},
+    client::session::Session as ScyllaSession, serialize::row::SerializeRow,
+    statement::prepared::PreparedStatement, value::Row,
 };
 use tokio::sync::Semaphore;
 
@@ -33,10 +32,10 @@ use crate::batching::BatchingStream;
 pub type QueryCompleteCallback = Arc<dyn Fn(usize) + Send + Sync>;
 
 /// DataFusion ExecutionPlan that executes a user-provided CQL query.
-pub struct ScyllaExec {
+pub struct ScyllaExec<P> {
     session: Arc<ScyllaSession>,
     prepared: Arc<PreparedStatement>,
-    partitioned_params: Vec<Vec<Vec<CqlValue>>>,
+    partitioned_params: Vec<Vec<P>>,
     semaphore: Arc<Semaphore>,
     schema: SchemaRef,
     properties: PlanProperties,
@@ -44,7 +43,7 @@ pub struct ScyllaExec {
     on_query_complete: Option<QueryCompleteCallback>,
 }
 
-impl fmt::Debug for ScyllaExec {
+impl<P> fmt::Debug for ScyllaExec<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ScyllaExec")
             .field("schema", &self.schema)
@@ -54,12 +53,12 @@ impl fmt::Debug for ScyllaExec {
     }
 }
 
-impl ScyllaExec {
+impl<P: SerializeRow + Clone + Send + Sync + 'static> ScyllaExec<P> {
     pub fn new(
         session: Arc<ScyllaSession>,
         schema: SchemaRef,
         prepared: Arc<PreparedStatement>,
-        params: Vec<Vec<CqlValue>>,
+        params: Vec<P>,
         num_partitions: usize,
         concurrency: usize,
     ) -> Self {
@@ -106,13 +105,13 @@ impl ScyllaExec {
     }
 }
 
-impl DisplayAs for ScyllaExec {
+impl<P: SerializeRow + Clone + Send + Sync + 'static> DisplayAs for ScyllaExec<P> {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "ScyllaExec: partitions={}", self.properties.partitioning)
     }
 }
 
-impl ExecutionPlan for ScyllaExec {
+impl<P: SerializeRow + Clone + Send + Sync + 'static> ExecutionPlan for ScyllaExec<P> {
     fn name(&self) -> &str {
         "ScyllaExec"
     }
@@ -155,20 +154,12 @@ impl ExecutionPlan for ScyllaExec {
 
         let on_query_complete = self.on_query_complete.clone();
 
-        // tracing::debug!(
-        //     partition,
-        //     num_param_sets = param_sets.len(),
-        //     concurrency,
-        //     "Executing from-query partition"
-        // );
-
         let params = self
             .partitioned_params
             .get(partition)
             .cloned()
             .unwrap_or_default();
 
-        // Each partition processes its parameter sets with limited concurrency
         let row_stream = futures::stream::iter(params.into_iter().enumerate())
             .map(move |(index, params)| {
                 let session = session.clone();
@@ -197,25 +188,18 @@ impl ExecutionPlan for ScyllaExec {
     }
 }
 
-/// Executes a query with the given parameters and returns a stream of rows.
-async fn query_with_params(
+async fn query_with_params<P: SerializeRow>(
     session: Arc<ScyllaSession>,
     prepared: Arc<PreparedStatement>,
-    params: Vec<CqlValue>,
+    params: P,
 ) -> std::result::Result<
     impl Stream<Item = std::result::Result<Row, DataFusionError>>,
     DataFusionError,
 > {
-    tracing::debug!(param_count = params.len(), "Starting parameterized query");
-
-    // Execute query with parameters as a slice
     let pager = session
-        .execute_iter((*prepared).clone(), params.as_slice())
+        .execute_iter((*prepared).clone(), params)
         .await
-        .map_err(|e| {
-            tracing::error!(param_count = params.len(), error = %e, "Parameterized query failed");
-            DataFusionError::External(Box::new(e))
-        })?;
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
     let typed_stream = pager
         .rows_stream::<Row>()

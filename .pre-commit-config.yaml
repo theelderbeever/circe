@@ -19,10 +19,11 @@ repos:
     hooks:
       - id: fmt
         stages: [pre-commit]
-        # args: [--all]
+        entry: cargo +nightly fmt
       - id: clippy
         stages: [pre-commit]
-        args: [--all-targets, --all, --, -D, clippy::all]
+        args:
+          [--all-targets, --all, --, -D, clippy::all, -D, warnings, --no-deps]
   - repo: local
     hooks:
       - id: cargo-test
