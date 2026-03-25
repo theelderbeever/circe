@@ -54,8 +54,13 @@ pub struct ScyllaArgs {
 
 #[derive(Debug, Args)]
 pub struct OutputArgs {
-    /// Output URL (file:///path or s3://bucket/prefix)
-    #[arg(short, long, env = "CIRCE_OUTPUT")]
+    /// Output URL (file:///path or s3://bucket/prefix).
+    #[arg(
+        short,
+        long,
+        env = "CIRCE_OUTPUT",
+        long_help = "Output URL (file:///path or s3://bucket/prefix).\nS3 configuration use the environment (https://docs.rs/object_store/latest/object_store/aws/struct.AmazonS3Builder.html#method.from_env)"
+    )]
     pub output: String,
 
     /// Hive partition columns (comma-separated)
