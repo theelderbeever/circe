@@ -14,7 +14,7 @@ use scylla::{
 use tokio::sync::{OnceCell, Semaphore};
 
 static SETUP: OnceCell<()> = OnceCell::const_new();
-static TEST_SEMAPHORE: Semaphore = Semaphore::const_new(2);
+static TEST_SEMAPHORE: Semaphore = Semaphore::const_new(10);
 
 async fn new_session() -> Arc<Session> {
     SETUP.get_or_init(setup_scylla).await;
@@ -455,5 +455,65 @@ async fn test_from_query_concurrent_multiple_filter_columns() {
                 _ => panic!("Unexpected region: {}", region),
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn test_datafusion_query_on_provider() {
+    let _permit = TEST_SEMAPHORE.acquire().await.unwrap();
+    let session = new_session().await;
+
+    let provider: ScyllaProvider<()> =
+        ScyllaProvider::builder(session, "SELECT * FROM test_ks.test_export".to_string())
+            .build()
+            .await
+            .expect("Failed to build provider");
+
+    let ctx = SessionContext::new();
+    ctx.register_table("scylla", Arc::new(provider))
+        .expect("Failed to register table");
+
+    let batches = ctx
+        .sql(
+            "SELECT region, COUNT(*) AS cnt, AVG(age) AS avg_age \
+             FROM scylla \
+             GROUP BY region \
+             ORDER BY region",
+        )
+        .await
+        .expect("Failed to run DataFusion query")
+        .collect()
+        .await
+        .expect("Failed to collect results");
+
+    let batch = datafusion::arrow::compute::concat_batches(&batches[0].schema(), &batches)
+        .expect("Failed to concat batches");
+
+    assert_eq!(batch.num_rows(), 4, "Expected 4 regions");
+
+    let regions = batch
+        .column_by_name("region")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .unwrap();
+
+    let counts = batch
+        .column_by_name("cnt")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap();
+
+    let expected = [
+        ("ap-south", 2),
+        ("eu-west", 3),
+        ("us-east", 3),
+        ("us-west", 2),
+    ];
+
+    for (i, (region, count)) in expected.iter().enumerate() {
+        assert_eq!(regions.value(i), *region);
+        assert_eq!(counts.value(i), *count);
     }
 }
