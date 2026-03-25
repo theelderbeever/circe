@@ -1,15 +1,11 @@
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
-use datafusion::object_store::aws::AmazonS3Builder;
-use datafusion::prelude::SessionContext;
+use datafusion::{object_store::aws::AmazonS3Builder, prelude::SessionContext};
 use indicatif::ProgressStyle;
 use itertools::Itertools;
-use scylla::client::session_builder::SessionBuilder;
-use scylla::frame::Compression;
-use scylla::value::CqlValue;
+use scylla::{client::session_builder::SessionBuilder, frame::Compression, value::CqlValue};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use url::Url;
 
@@ -283,9 +279,7 @@ async fn run_token_range(
 }
 
 fn setup_tracing(interactive: bool) {
-    use tracing_subscriber::EnvFilter;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 

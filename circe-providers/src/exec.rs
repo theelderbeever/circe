@@ -1,23 +1,29 @@
-use std::any::Any;
-use std::convert::TryInto;
-use std::fmt;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::{
+    any::Any,
+    convert::TryInto,
+    fmt,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
-use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::error::{DataFusionError, Result};
-use datafusion::execution::TaskContext;
-use datafusion::physical_expr::EquivalenceProperties;
-use datafusion::physical_plan::Partitioning;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+use datafusion::{
+    arrow::datatypes::SchemaRef,
+    error::{DataFusionError, Result},
+    execution::TaskContext,
+    physical_expr::EquivalenceProperties,
+    physical_plan::{
+        DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+        SendableRecordBatchStream,
+        execution_plan::{Boundedness, EmissionType},
+    },
 };
 use futures::{Stream, StreamExt, TryStreamExt};
-use scylla::client::session::Session as ScyllaSession;
-use scylla::statement::prepared::PreparedStatement;
-use scylla::value::{CqlValue, Row};
+use scylla::{
+    client::session::Session as ScyllaSession,
+    statement::prepared::PreparedStatement,
+    value::{CqlValue, Row},
+};
 use tokio::sync::Semaphore;
 
 use crate::batching::BatchingStream;

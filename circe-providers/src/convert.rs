@@ -1,15 +1,21 @@
 use std::sync::Arc;
 
-use datafusion::arrow::array::{
-    ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder,
-    Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, MapBuilder, StringBuilder,
-    Time64NanosecondBuilder, TimestampMillisecondBuilder,
+use datafusion::{
+    arrow::{
+        array::{
+            ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder,
+            Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, MapBuilder,
+            StringBuilder, Time64NanosecondBuilder, TimestampMillisecondBuilder,
+        },
+        datatypes::{DataType, Field, SchemaRef, TimeUnit},
+        record_batch::RecordBatch,
+    },
+    error::{DataFusionError, Result},
 };
-use datafusion::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::error::{DataFusionError, Result};
-use scylla::frame::response::result::{CollectionType, ColumnType, NativeType};
-use scylla::value::{CqlValue, Row};
+use scylla::{
+    frame::response::result::{CollectionType, ColumnType, NativeType},
+    value::{CqlValue, Row},
+};
 
 /// Converts a Scylla CQL column type to an Arrow DataType.
 pub fn to_arrow(coltype: &ColumnType) -> Result<DataType> {

@@ -1,21 +1,20 @@
-use std::any::Any;
-use std::fmt;
-use std::sync::Arc;
+use std::{any::Any, fmt, sync::Arc};
 
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
-use datafusion::catalog::Session as DfSession;
-use datafusion::catalog::TableProvider;
-use datafusion::datasource::TableType;
-use datafusion::error::Result;
-use datafusion::logical_expr::Expr;
-use datafusion::physical_plan::ExecutionPlan;
-use scylla::client::session::Session as ScyllaSession;
-use scylla::statement::prepared::PreparedStatement;
-use scylla::value::CqlValue;
+use datafusion::{
+    arrow::datatypes::{Field, Schema, SchemaRef},
+    catalog::{Session as DfSession, TableProvider},
+    datasource::TableType,
+    error::Result,
+    logical_expr::Expr,
+    physical_plan::ExecutionPlan,
+};
+use scylla::{
+    client::session::Session as ScyllaSession, statement::prepared::PreparedStatement,
+    value::CqlValue,
+};
 
-use crate::convert::to_arrow;
-use crate::error::ScyllaProviderError;
+use crate::{convert::to_arrow, error::ScyllaProviderError};
 
 use super::exec::{QueryCompleteCallback, ScyllaExec};
 

@@ -7,8 +7,7 @@
 //! - Table: events with timestamp clustering for time-series queries
 //! - Table: users with simple partition key for basic testing
 
-use scylla::client::session_builder::SessionBuilder;
-use scylla::value::CqlTimestamp;
+use scylla::{client::session_builder::SessionBuilder, value::CqlTimestamp};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

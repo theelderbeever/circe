@@ -1,11 +1,14 @@
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::{
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
-use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::error::{DataFusionError, Result};
-use datafusion::physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
+use datafusion::{
+    arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
+    error::{DataFusionError, Result},
+    physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter},
+};
 use futures::Stream;
 use scylla::value::Row;
 

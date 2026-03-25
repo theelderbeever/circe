@@ -1,11 +1,12 @@
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
 use chrono::DateTime;
-use scylla::frame::response::result::ColumnSpec;
-use scylla::statement::prepared::PreparedStatement;
-use scylla::value::{CqlDate, CqlTime, CqlTimestamp, CqlTimeuuid, CqlValue};
+use scylla::{
+    frame::response::result::ColumnSpec,
+    statement::prepared::PreparedStatement,
+    value::{CqlDate, CqlTime, CqlTimestamp, CqlTimeuuid, CqlValue},
+};
 
 /// Parse a comma-separated string into individual parameter values.
 pub fn parse_param_set(csv: &str) -> Vec<String> {

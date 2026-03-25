@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use datafusion::catalog::TableProvider;
-use datafusion::dataframe::DataFrameWriteOptions;
-use datafusion::error::Result;
-use datafusion::prelude::SessionContext;
+use datafusion::{
+    catalog::TableProvider, dataframe::DataFrameWriteOptions, error::Result,
+    prelude::SessionContext,
+};
 
 // use crate::providers::token_range::ScyllaTokenRangeProvider;
 
