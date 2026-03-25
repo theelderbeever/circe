@@ -6,16 +6,19 @@ use clap::{Args, Parser, Subcommand};
 use datafusion::object_store::aws::AmazonS3Builder;
 use datafusion::prelude::SessionContext;
 use indicatif::ProgressStyle;
+use itertools::Itertools;
 use scylla::client::session_builder::SessionBuilder;
-
 use scylla::frame::Compression;
+use scylla::value::CqlValue;
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use url::Url;
 
-use circe_providers::ScyllaFromQueryProvider;
-use circe_providers::writer::write_hive_partitioned_parquet;
+use circe_providers::ScyllaProvider;
 
-mod params;
+use crate::writer::write_hive_partitioned_parquet;
+
+pub(crate) mod params;
+pub(crate) mod writer;
 
 #[derive(Debug, Parser)]
 #[command(name = "circe", about = "Export ScyllaDB tables to columnar formats")]
@@ -90,6 +93,26 @@ pub struct TokenRangeArgs {
     /// Number of token range splits and max concurrent queries (defaults to 2 * num_cpus)
     #[arg(short = 'C', long, default_value_t = num_cpus::get() * 2)]
     pub concurrency: usize,
+}
+
+impl TokenRangeArgs {
+    /// Splits the full Murmur3 token space into `num_ranges` sub-ranges.
+    ///
+    /// Returns a lazy iterator of [`TokenRange`] values covering
+    /// `i64::MIN..=i64::MAX`.
+    pub fn token_ranges(&self) -> impl Iterator<Item = (i64, i64, usize)> {
+        const MIN_TOKEN: i128 = i64::MIN as i128;
+        const MAX_TOKEN: i128 = i64::MAX as i128;
+
+        let total_range = (MAX_TOKEN - MIN_TOKEN) as usize;
+        let step = total_range / self.concurrency;
+
+        (MIN_TOKEN..=MAX_TOKEN)
+            .step_by(step)
+            .tuple_windows()
+            .enumerate()
+            .map(|(i, (start, end))| (start.max(MIN_TOKEN) as i64, end.min(MAX_TOKEN) as i64, i))
+    }
 }
 
 #[derive(Debug, Args)]
@@ -182,9 +205,8 @@ impl Cli {
         output.output = normalized_output;
 
         match self.command {
-            Command::TokenRange(_args) => {
-                unimplemented!()
-                // run_token_range(interactive, &output, args, session, &ctx).await?;
+            Command::TokenRange(args) => {
+                run_token_range(interactive, &output, args, session, &ctx).await?;
             }
             Command::FromQuery(args) => {
                 run_from_query(interactive, &output, args, session, &ctx).await?;
@@ -195,74 +217,70 @@ impl Cli {
     }
 }
 
-// #[tracing::instrument(skip_all, name = "export")]
-// async fn run_token_range(
-//     interactive: bool,
-//     output: &OutputArgs,
-//     args: TokenRangeArgs,
-//     session: Arc<scylla::client::session::Session>,
-//     ctx: &SessionContext,
-// ) -> anyhow::Result<()> {
-//     tracing::info!(table = %args.table, output = %output.output, "Starting token range scan");
+#[tracing::instrument(skip_all, name = "export")]
+async fn run_token_range(
+    interactive: bool,
+    output: &OutputArgs,
+    args: TokenRangeArgs,
+    session: Arc<scylla::client::session::Session>,
+    ctx: &SessionContext,
+) -> anyhow::Result<()> {
+    tracing::info!(table = %args.table, output = %output.output, "Starting token range scan");
 
-//     let partition_keys = args.partition_keys.clone();
+    let partition_keys = args.partition_keys.clone();
 
-//     let (keyspace, table) = args
-//         .table
-//         .split_once('.')
-//         .context("--table must be in the form {keyspace}.{table}")?;
+    let (keyspace, table) = args
+        .table
+        .split_once('.')
+        .context("--table must be in the form {keyspace}.{table}")?;
 
-//     let builder = ScyllaTokenRangeProvider::builder(session, keyspace.to_owned(), table.to_owned())
-//         .partition_key_columns(args.partition_keys)
-//         .columns(args.columns)
-//         .concurrency(args.concurrency);
+    let pk_cols_csv = args.partition_keys.join(", ");
+    let select_cols = args.columns.join(", ");
+    let scan_query = format!(
+        "SELECT {select_cols} FROM {keyspace}.{table} WHERE TOKEN({pk_cols_csv}) >= ? AND TOKEN({pk_cols_csv}) < ? BYPASS CACHE"
+    );
 
-//     // Set up progress bar styling if interactive
-//     let (progress_span, builder) = Cli::setup_progress_bar(interactive, builder, |b, callback| {
-//         b.on_range_complete(move |idx| callback(idx))
-//     })?;
+    let param_sets: Vec<Vec<CqlValue>> = args
+        .token_ranges()
+        .map(|(start, end, ..)| vec![CqlValue::BigInt(start), CqlValue::BigInt(end)])
+        .collect();
+    let num_ranges = param_sets.len();
 
-//     let provider = Arc::new(builder.build().await?);
+    let mut builder =
+        ScyllaProvider::builder(session, scan_query).with_max_concurrency(args.concurrency);
 
-//     let partition_cols = output.partition_by.clone().unwrap_or(partition_keys);
-//     let num_ranges = provider.num_ranges();
+    for params in param_sets {
+        builder = builder.with_params(params);
+    }
 
-//     // Spawn throughput monitor FIRST so it appears above the progress bar
-//     let (throughput_span, throughput_handle) = if interactive {
-//         let row_counter = provider.row_counter();
-//         let (span, handle) = Cli::spawn_throughput_monitor(row_counter);
-//         (Some(span), Some(handle))
-//     } else {
-//         (None, None)
-//     };
+    // Set up progress bar styling if interactive
+    let (progress_span, builder) = Cli::setup_progress_bar(interactive, builder, |b, callback| {
+        b.on_query_complete(callback)
+    })?;
 
-//     // Set progress bar length after we know the count
-//     if interactive {
-//         tracing::Span::current().pb_set_length(num_ranges as u64);
-//     }
+    let provider = Arc::new(builder.build().await?);
 
-//     write_hive_partitioned_parquet(ctx, provider, &output.output, partition_cols).await?;
+    let partition_cols = output.partition_by.clone().unwrap_or(partition_keys);
 
-//     // Stop throughput monitor
-//     if let Some(handle) = throughput_handle {
-//         handle.abort();
-//     }
+    // Set progress bar length after we know the count
+    if interactive {
+        tracing::Span::current().pb_set_length(num_ranges as u64);
+    }
 
-//     // Keep throughput_span alive until here
-//     drop(throughput_span);
+    write_hive_partitioned_parquet(ctx, provider, &output.output, partition_cols).await?;
 
-//     if let Some(span) = &progress_span {
-//         // Force final progress bar update to 100%
-//         span.pb_set_position(num_ranges as u64);
-//         span.pb_tick();
+    if let Some(span) = &progress_span {
+        // Force final progress bar update to 100%
+        span.pb_set_position(num_ranges as u64);
+        span.pb_tick();
 
-//         // Give indicatif time to render the update
-//         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-//     }
+        // Give indicatif time to render the update
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
 
-//     tracing::info!("Token range scan completed successfully");
-//     Ok(())
-// }
+    tracing::info!("Token range scan completed successfully");
+    Ok(())
+}
 
 fn setup_tracing(interactive: bool) {
     use tracing_subscriber::EnvFilter;
@@ -321,7 +339,7 @@ async fn run_from_query(
     };
 
     // Build provider with converted parameters
-    let mut builder = ScyllaFromQueryProvider::builder(session, args.query);
+    let mut builder = ScyllaProvider::builder(session, args.query);
     if !param_sets.is_empty() {
         for params in param_sets {
             builder = builder.with_params(params);

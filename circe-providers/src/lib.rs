@@ -1,9 +1,8 @@
 pub mod batching;
 pub mod convert;
 pub mod error;
-pub mod providers;
-pub mod writer;
+pub mod exec;
+pub mod provider;
 
-// Re-export commonly used types for convenience
-pub use providers::from_query::{QueryCompleteCallback, ScyllaFromQueryProvider};
-// pub use providers::token_range::{ScyllaTokenRangeProvider, TokenRange};
+pub use exec::QueryCompleteCallback;
+pub use provider::{ScyllaProvider, ScyllaProviderBuilder};

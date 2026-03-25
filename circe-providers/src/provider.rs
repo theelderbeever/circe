@@ -17,14 +17,14 @@ use scylla::value::CqlValue;
 use crate::convert::to_arrow;
 use crate::error::ScyllaProviderError;
 
-use super::exec::{QueryCompleteCallback, ScyllaFromQueryExec};
+use super::exec::{QueryCompleteCallback, ScyllaExec};
 
 /// A DataFusion TableProvider that executes a user-provided CQL query.
 ///
 /// Supports parameterized queries with multiple parameter sets for concurrent execution.
 /// Each parameter set creates one partition, allowing DataFusion to execute queries in parallel.
 #[derive(Clone)]
-pub struct ScyllaFromQueryProvider {
+pub struct ScyllaProvider {
     session: Arc<ScyllaSession>,
     schema: SchemaRef,
     prepared: Arc<PreparedStatement>,
@@ -33,7 +33,7 @@ pub struct ScyllaFromQueryProvider {
     on_query_complete: Option<QueryCompleteCallback>,
 }
 
-impl fmt::Debug for ScyllaFromQueryProvider {
+impl fmt::Debug for ScyllaProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ScyllaFromQueryProvider")
             .field("param_sets_count", &self.param_sets.len())
@@ -41,9 +41,9 @@ impl fmt::Debug for ScyllaFromQueryProvider {
     }
 }
 
-impl ScyllaFromQueryProvider {
-    pub fn builder(session: Arc<ScyllaSession>, query: String) -> ScyllaFromQueryProviderBuilder {
-        ScyllaFromQueryProviderBuilder::new(session, query)
+impl ScyllaProvider {
+    pub fn builder(session: Arc<ScyllaSession>, query: String) -> ScyllaProviderBuilder {
+        ScyllaProviderBuilder::new(session, query)
     }
 
     pub fn num_queries(&self) -> usize {
@@ -65,7 +65,7 @@ impl ScyllaFromQueryProvider {
 }
 
 #[async_trait]
-impl TableProvider for ScyllaFromQueryProvider {
+impl TableProvider for ScyllaProvider {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -85,7 +85,7 @@ impl TableProvider for ScyllaFromQueryProvider {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let mut exec = ScyllaFromQueryExec::new(
+        let mut exec = ScyllaExec::new(
             self.session.clone(),
             self.schema.clone(),
             self.prepared.clone(),
@@ -104,7 +104,7 @@ impl TableProvider for ScyllaFromQueryProvider {
 }
 
 /// Builder for constructing a [`ScyllaFromQueryProvider`].
-pub struct ScyllaFromQueryProviderBuilder {
+pub struct ScyllaProviderBuilder {
     session: Arc<ScyllaSession>,
     query: String,
     params: Vec<Vec<CqlValue>>,
@@ -112,7 +112,7 @@ pub struct ScyllaFromQueryProviderBuilder {
     on_query_complete: Option<QueryCompleteCallback>,
 }
 
-impl ScyllaFromQueryProviderBuilder {
+impl ScyllaProviderBuilder {
     fn new(session: Arc<ScyllaSession>, query: String) -> Self {
         Self {
             session,
@@ -143,7 +143,7 @@ impl ScyllaFromQueryProviderBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<ScyllaFromQueryProvider> {
+    pub async fn build(self) -> Result<ScyllaProvider> {
         // If not provided limit the concurrency to the minimum between the number of cpus
         // or the quantity of parameter sets. At least 1.
         let max_concurrency = self.max_concurrency.unwrap_or(self.params.len()).max(1);
@@ -155,9 +155,9 @@ impl ScyllaFromQueryProviderBuilder {
                 .map_err(ScyllaProviderError::Prepare)?,
         );
 
-        let schema = Arc::new(ScyllaFromQueryProvider::metadata_to_schema(&prepared)?);
+        let schema = Arc::new(ScyllaProvider::metadata_to_schema(&prepared)?);
 
-        Ok(ScyllaFromQueryProvider {
+        Ok(ScyllaProvider {
             session: self.session,
             schema,
             prepared,
@@ -168,7 +168,7 @@ impl ScyllaFromQueryProviderBuilder {
     }
 }
 
-impl fmt::Debug for ScyllaFromQueryProviderBuilder {
+impl fmt::Debug for ScyllaProviderBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ScyllaFromQueryProviderBuilder")
             .field("query", &self.query)

@@ -21,6 +21,7 @@ num_cpus = { workspace = true }
 chrono = { workspace = true }
 hex = "0.4"
 uuid = "1"
+itertools.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

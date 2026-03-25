@@ -27,7 +27,7 @@ use crate::batching::BatchingStream;
 pub type QueryCompleteCallback = Arc<dyn Fn(usize) + Send + Sync>;
 
 /// DataFusion ExecutionPlan that executes a user-provided CQL query.
-pub struct ScyllaFromQueryExec {
+pub struct ScyllaExec {
     session: Arc<ScyllaSession>,
     prepared: Arc<PreparedStatement>,
     partitioned_params: Vec<Vec<Vec<CqlValue>>>,
@@ -38,7 +38,7 @@ pub struct ScyllaFromQueryExec {
     on_query_complete: Option<QueryCompleteCallback>,
 }
 
-impl fmt::Debug for ScyllaFromQueryExec {
+impl fmt::Debug for ScyllaExec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ScyllaFromQueryExec")
             .field("schema", &self.schema)
@@ -48,7 +48,7 @@ impl fmt::Debug for ScyllaFromQueryExec {
     }
 }
 
-impl ScyllaFromQueryExec {
+impl ScyllaExec {
     pub fn new(
         session: Arc<ScyllaSession>,
         schema: SchemaRef,
@@ -100,7 +100,7 @@ impl ScyllaFromQueryExec {
     }
 }
 
-impl DisplayAs for ScyllaFromQueryExec {
+impl DisplayAs for ScyllaExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
@@ -110,7 +110,7 @@ impl DisplayAs for ScyllaFromQueryExec {
     }
 }
 
-impl ExecutionPlan for ScyllaFromQueryExec {
+impl ExecutionPlan for ScyllaExec {
     fn name(&self) -> &str {
         "ScyllaFromQueryExec"
     }

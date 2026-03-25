@@ -593,6 +593,7 @@ dependencies = [
  "datafusion",
  "hex",
  "indicatif",
+ "itertools",
  "num_cpus",
  "scylla",
  "tempfile",
