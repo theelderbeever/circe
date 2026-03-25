@@ -1,7 +1,7 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use datafusion::{object_store::aws::AmazonS3Builder, prelude::SessionContext};
 use indicatif::ProgressStyle;
 use itertools::Itertools;
@@ -11,7 +11,7 @@ use url::Url;
 
 use circe_providers::ScyllaProvider;
 
-use crate::writer::write_hive_partitioned_parquet;
+use crate::writer::write;
 
 pub(crate) mod params;
 pub(crate) mod writer;
@@ -44,12 +44,21 @@ pub struct ScyllaArgs {
     pub known_nodes: Vec<String>,
 
     /// ScyllaDB username
-    #[arg(long, env = "CIRCE_USER")]
-    pub scylla_user: Option<String>,
+    #[arg(short = 'U', long, env = "CIRCE_USER")]
+    pub user: Option<String>,
 
     /// ScyllaDB password
-    #[arg(long, env = "CIRCE_PASSWORD")]
-    pub scylla_password: Option<String>,
+    #[arg(short = 'P', long, env = "CIRCE_PASSWORD")]
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, ValueEnum)]
+pub enum OutputFormat {
+    #[default]
+    Parquet,
+    Csv,
+    #[value(name = "ndjson", alias = "jsonl")]
+    Ndjson,
 }
 
 #[derive(Debug, Args)]
@@ -63,18 +72,42 @@ pub struct OutputArgs {
     )]
     pub output: String,
 
+    /// Output format
+    #[arg(short = 'F', long, default_value = "parquet")]
+    pub format: OutputFormat,
+
+    /// Write output to a single file instead of multiple part files
+    #[arg(short, long, conflicts_with = "partition_by")]
+    pub single_file: bool,
+
     /// Hive partition columns (comma-separated)
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', conflicts_with = "single_file")]
     pub partition_by: Option<Vec<String>>,
 
     /// Optional DataFusion SQL to run on the fetched data before writing.
     /// Reference the source data as "source".
     /// Example: "SELECT region, COUNT(*) as cnt FROM source GROUP BY region"
-    #[arg(long)]
+    #[arg(short = 'T', long, global = true)]
     pub transform: Option<String>,
 }
 
 impl OutputArgs {
+    /// Returns the effective output format, preferring a recognized file extension
+    /// over the `--format` flag.
+    pub fn output_format(&self) -> anyhow::Result<OutputFormat> {
+        let path = self.output.trim_end_matches('/');
+        match std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+        {
+            Some("parquet") => Ok(OutputFormat::Parquet),
+            Some("csv") => Ok(OutputFormat::Csv),
+            Some("ndjson" | "jsonl" | "json") => Ok(OutputFormat::Ndjson),
+            None => Ok(self.format.clone()),
+            Some(ext) => anyhow::bail!("Unrecognized output extension: .{ext}"),
+        }
+    }
+
     /// Normalizes an output path to a proper URL.
     /// If the path doesn't have a scheme, treats it as a file path and converts to absolute file:// URL.
     fn normalize_output_path(&self) -> anyhow::Result<String> {
@@ -127,7 +160,7 @@ pub struct TokenRangeArgs {
     pub table: String,
 
     /// Partition key columns for token range scanning (comma-separated). Must be in order of table partition key.
-    #[arg(short = 'K', long, value_delimiter = ',')]
+    #[arg(short = 'K', long, value_delimiter = ',', required = true)]
     pub partition_keys: Vec<String>,
 
     /// Columns to select (comma-separated, defaults to all)
@@ -230,9 +263,7 @@ impl Cli {
                 .known_node(node)
                 .compression(Some(Compression::Lz4));
         }
-        if let (Some(user), Some(password)) =
-            (&self.scylla.scylla_user, &self.scylla.scylla_password)
-        {
+        if let (Some(user), Some(password)) = (&self.scylla.user, &self.scylla.password) {
             session_builder = session_builder.user(user, password);
         }
         let session = Arc::new(session_builder.build().await?);
@@ -244,11 +275,13 @@ impl Cli {
         match &self.command {
             Command::TokenRange(args) => {
                 let (query, params) = args.prepare()?;
+                tracing::debug!("{query}");
                 self.execute_query(ctx, session, query, params, args.concurrency)
                     .await?;
             }
             Command::Query(args) => {
                 let (query, params) = args.prepare(&session).await?;
+                tracing::debug!("{query}");
                 self.execute_query(ctx, session, query, params, args.max_concurrency)
                     .await?;
             }
@@ -257,6 +290,7 @@ impl Cli {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn execute_query(
         &self,
         ctx: SessionContext,
@@ -289,11 +323,11 @@ impl Cli {
         let provider = Arc::new(builder.build().await?);
         let num_queries = provider.num_queries() as u64;
 
-        if self.interactive {
-            tracing::Span::current().pb_set_length(num_queries);
+        if let Some(span) = &progress_span {
+            span.pb_set_length(num_queries);
         }
 
-        write_hive_partitioned_parquet(&ctx, provider, &self.output).await?;
+        write(&ctx, provider, &self.output).await?;
 
         if let Some(span) = &progress_span {
             span.pb_set_position(num_queries);

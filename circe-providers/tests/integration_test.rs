@@ -40,7 +40,7 @@ pub async fn write_hive_partitioned_parquet<T>(
 where
     T: TableProvider + 'static,
 {
-    tracing::info!(
+    tracing::debug!(
         output = %output_url,
         partitions = ?partition_columns,
         "Writing Parquet output"
