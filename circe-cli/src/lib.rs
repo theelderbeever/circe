@@ -69,7 +69,7 @@ pub enum Command {
     TokenRange(TokenRangeArgs),
 
     /// Execute a custom query (not yet implemented)
-    FromQuery(FromQueryArgs),
+    Query(QueryArgs),
 }
 
 #[derive(Debug, Args)]
@@ -79,11 +79,11 @@ pub struct TokenRangeArgs {
     pub table: String,
 
     /// Partition key columns for token range scanning (comma-separated). Must be in order of table partition key.
-    #[arg(long, value_delimiter = ',')]
+    #[arg(short = 'K', long, value_delimiter = ',')]
     pub partition_keys: Vec<String>,
 
     /// Columns to select (comma-separated, defaults to all)
-    #[arg(long, value_delimiter = ',', default_value = "*")]
+    #[arg(short, long, value_delimiter = ',', default_value = "*")]
     pub columns: Vec<String>,
 
     /// Number of token range splits and max concurrent queries (defaults to 2 * num_cpus)
@@ -112,7 +112,7 @@ impl TokenRangeArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct FromQueryArgs {
+pub struct QueryArgs {
     /// The CQL query to execute
     pub query: String,
 
@@ -204,7 +204,7 @@ impl Cli {
             Command::TokenRange(args) => {
                 run_token_range(interactive, &output, args, session, &ctx).await?;
             }
-            Command::FromQuery(args) => {
+            Command::Query(args) => {
                 run_from_query(interactive, &output, args, session, &ctx).await?;
             }
         }
@@ -302,7 +302,7 @@ fn setup_tracing(interactive: bool) {
 async fn run_from_query(
     _interactive: bool,
     output: &OutputArgs,
-    args: FromQueryArgs,
+    args: QueryArgs,
     session: Arc<scylla::client::session::Session>,
     ctx: &SessionContext,
 ) -> anyhow::Result<()> {

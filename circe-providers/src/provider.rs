@@ -34,7 +34,7 @@ pub struct ScyllaProvider {
 
 impl fmt::Debug for ScyllaProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ScyllaFromQueryProvider")
+        f.debug_struct("ScyllaProvider")
             .field("param_sets_count", &self.param_sets.len())
             .finish()
     }
@@ -102,7 +102,7 @@ impl TableProvider for ScyllaProvider {
     }
 }
 
-/// Builder for constructing a [`ScyllaFromQueryProvider`].
+/// Builder for constructing a [`ScyllaProvider`].
 pub struct ScyllaProviderBuilder {
     session: Arc<ScyllaSession>,
     query: String,
@@ -169,7 +169,7 @@ impl ScyllaProviderBuilder {
 
 impl fmt::Debug for ScyllaProviderBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ScyllaFromQueryProviderBuilder")
+        f.debug_struct("ScyllaProviderBuilder")
             .field("query", &self.query)
             .field("param_sets_count", &self.params.len())
             .finish()

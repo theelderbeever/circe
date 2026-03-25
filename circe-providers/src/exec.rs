@@ -46,7 +46,7 @@ pub struct ScyllaExec {
 
 impl fmt::Debug for ScyllaExec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ScyllaFromQueryExec")
+        f.debug_struct("ScyllaExec")
             .field("schema", &self.schema)
             .field("concurrency", &self.semaphore.available_permits())
             .field("partitions", &self.properties.partitioning)
@@ -108,17 +108,13 @@ impl ScyllaExec {
 
 impl DisplayAs for ScyllaExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "ScyllaFromQueryExec: partitions={}",
-            self.properties.partitioning
-        )
+        write!(f, "ScyllaExec: partitions={}", self.properties.partitioning)
     }
 }
 
 impl ExecutionPlan for ScyllaExec {
     fn name(&self) -> &str {
-        "ScyllaFromQueryExec"
+        "ScyllaExec"
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -141,7 +137,7 @@ impl ExecutionPlan for ScyllaExec {
             Ok(self)
         } else {
             Err(DataFusionError::Internal(
-                "ScyllaFromQueryExec has no children".into(),
+                "ScyllaExec has no children".into(),
             ))
         }
     }

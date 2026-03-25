@@ -3,7 +3,7 @@
 // use std::path::PathBuf;
 // use std::sync::Arc;
 
-// use circe_providers::providers::from_query::ScyllaFromQueryProvider;
+// use circe_providers::providers::from_query::ScyllaProvider;
 // use circe_providers::providers::token_range::ScyllaTokenRangeProvider;
 // use circe_providers::writer::write_hive_partitioned_parquet;
 // use datafusion::arrow::array::Array;
@@ -223,7 +223,7 @@
 //     let session = setup_scylla().await;
 
 //     let provider =
-//         ScyllaFromQueryProvider::builder(session, "SELECT * FROM test_ks.test_export".to_string())
+//         ScyllaProvider::builder(session, "SELECT * FROM test_ks.test_export".to_string())
 //             .build()
 //             .await
 //             .expect("Failed to build provider");
@@ -262,7 +262,7 @@
 // async fn test_from_query_with_limit() {
 //     let session = setup_scylla().await;
 
-//     let provider = ScyllaFromQueryProvider::builder(
+//     let provider = ScyllaProvider::builder(
 //         session,
 //         "SELECT * FROM test_ks.test_export LIMIT 5".to_string(),
 //     )
@@ -298,7 +298,7 @@
 
 //     let param_sets = vec![vec![CqlValue::Text("us-east".to_string())]];
 
-//     let provider = ScyllaFromQueryProvider::builder(
+//     let provider = ScyllaProvider::builder(
 //         session,
 //         "SELECT * FROM test_ks.test_export WHERE region = ?".to_string(),
 //     )
@@ -350,7 +350,7 @@
 //         CqlValue::Int(25),
 //     ]];
 
-//     let provider = ScyllaFromQueryProvider::builder(
+//     let provider = ScyllaProvider::builder(
 //         session,
 //         "SELECT * FROM test_ks.test_export WHERE region = ? AND age > ? ALLOW FILTERING"
 //             .to_string(),
@@ -410,7 +410,7 @@
 //         vec![CqlValue::Text("eu-west".to_string())],
 //     ];
 
-//     let provider = ScyllaFromQueryProvider::builder(
+//     let provider = ScyllaProvider::builder(
 //         session,
 //         "SELECT * FROM test_ks.test_export WHERE region = ?".to_string(),
 //     )
@@ -469,7 +469,7 @@
 //         vec![CqlValue::Text("eu-west".to_string()), CqlValue::Int(30)],
 //     ];
 
-//     let provider = ScyllaFromQueryProvider::builder(
+//     let provider = ScyllaProvider::builder(
 //         session,
 //         "SELECT * FROM test_ks.test_export WHERE region = ? AND age > ? ALLOW FILTERING"
 //             .to_string(),
