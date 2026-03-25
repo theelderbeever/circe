@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
@@ -66,6 +66,49 @@ pub struct OutputArgs {
     /// Hive partition columns (comma-separated)
     #[arg(long, value_delimiter = ',')]
     pub partition_by: Option<Vec<String>>,
+
+    /// Optional DataFusion SQL to run on the fetched data before writing.
+    /// Reference the source data as "source".
+    /// Example: "SELECT region, COUNT(*) as cnt FROM source GROUP BY region"
+    #[arg(long)]
+    pub transform: Option<String>,
+}
+
+impl OutputArgs {
+    /// Normalizes an output path to a proper URL.
+    /// If the path doesn't have a scheme, treats it as a file path and converts to absolute file:// URL.
+    fn normalize_output_path(&self) -> anyhow::Result<String> {
+        // Try parsing as URL first
+        match Url::parse(&self.output) {
+            Ok(url) => {
+                // Valid URL with scheme
+                Ok(url.to_string())
+            }
+            Err(url::ParseError::RelativeUrlWithoutBase) => {
+                // No scheme, treat as file path
+                let path = std::path::Path::new(&self.output);
+                let absolute_path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    std::env::current_dir()?.join(path)
+                };
+
+                // Convert to file:// URL
+                let file_url = Url::from_file_path(&absolute_path).map_err(|_| {
+                    anyhow::anyhow!(
+                        "Failed to convert path to file:// URL: {}",
+                        absolute_path.display()
+                    )
+                })?;
+
+                Ok(file_url.to_string())
+            }
+            Err(e) => {
+                // Other parse errors
+                Err(anyhow::anyhow!("Invalid output path: {}", e))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -97,11 +140,32 @@ pub struct TokenRangeArgs {
 }
 
 impl TokenRangeArgs {
-    /// Splits the full Murmur3 token space into `num_ranges` sub-ranges.
-    ///
-    /// Returns a lazy iterator of [`TokenRange`] values covering
-    /// `i64::MIN..=i64::MAX`.
-    pub fn token_ranges(&self) -> impl Iterator<Item = (i64, i64, usize)> {
+    pub fn prepare(&self) -> anyhow::Result<(String, Vec<HashMap<String, CqlValue>>)> {
+        let (keyspace, table) = self
+            .table
+            .split_once('.')
+            .context("--table must be in the form {keyspace}.{table}")?;
+
+        let pk_cols = self.partition_keys.join(", ");
+        let selection = self.columns.join(", ");
+        let query = format!(
+            "SELECT {selection} FROM {keyspace}.{table} WHERE TOKEN({pk_cols}) >= :token_start AND TOKEN({pk_cols}) < :token_end BYPASS CACHE"
+        );
+
+        let params = self
+            .token_ranges()
+            .map(|(start, end, ..)| {
+                HashMap::from([
+                    ("token_start".to_string(), CqlValue::BigInt(start)),
+                    ("token_end".to_string(), CqlValue::BigInt(end)),
+                ])
+            })
+            .collect();
+
+        Ok((query, params))
+    }
+
+    fn token_ranges(&self) -> impl Iterator<Item = (i64, i64, usize)> {
         const MIN_TOKEN: i128 = i64::MIN as i128;
         const MAX_TOKEN: i128 = i64::MAX as i128;
 
@@ -127,45 +191,35 @@ pub struct QueryArgs {
     #[arg(long)]
     pub params: Option<PathBuf>,
 
-    /// Max concurrent queries to Scylla (defaults to num_cpus * 10)
-    #[arg(short = 'C', long)]
-    pub max_concurrency: Option<usize>,
+    /// Max concurrent queries to Scylla (defaults to num_cpus * 2)
+    #[arg(short = 'C', long, default_value_t = num_cpus::get() * 2)]
+    pub max_concurrency: usize,
+}
+
+impl QueryArgs {
+    pub async fn prepare(
+        &self,
+        session: &scylla::client::session::Session,
+    ) -> anyhow::Result<(String, Vec<HashMap<String, CqlValue>>)> {
+        let params = if let Some(params_file) = &self.params {
+            let prepared = session
+                .prepare(self.query.as_str())
+                .await
+                .context("Failed to prepare CQL query")?;
+            let raw = params::parse_params_from_file(params_file)?;
+            tracing::debug!(count = raw.len(), "Converting parameter sets");
+            params::convert_param_sets(raw, &prepared)?
+        } else {
+            vec![]
+        };
+
+        Ok((self.query.clone(), params))
+    }
 }
 
 impl Cli {
-    /// Sets up a progress bar for interactive mode and returns a callback and span.
-    /// Returns (optional_span, builder) with the builder already configured with the callback.
-    fn setup_progress_bar<B, F>(
-        interactive: bool,
-        builder: B,
-        attach_callback: F,
-    ) -> anyhow::Result<(Option<tracing::Span>, B)>
-    where
-        F: FnOnce(B, Arc<dyn Fn(usize) + Send + Sync>) -> B,
-    {
-        if interactive {
-            let current_span = tracing::Span::current();
-            current_span.pb_set_style(
-                &ProgressStyle::with_template(
-                    "[{elapsed_precise}] {bar:100.cyan/blue} {pos:>5}/{len:5} {per_sec:.1} [{eta_precise}]",
-                )
-                .context("invalid progress bar template")?,
-            );
-
-            let span_clone = current_span.clone();
-            let callback = Arc::new(move |_: usize| {
-                span_clone.pb_inc(1);
-            });
-
-            let builder = attach_callback(builder, callback);
-            Ok((Some(current_span), builder))
-        } else {
-            Ok((None, builder))
-        }
-    }
-
     #[tracing::instrument]
-    pub async fn execute(self) -> anyhow::Result<()> {
+    pub async fn execute(&self) -> anyhow::Result<()> {
         // --- Tracing setup ---
         setup_tracing(self.interactive);
 
@@ -183,94 +237,72 @@ impl Cli {
         }
         let session = Arc::new(session_builder.build().await?);
 
-        // --- Normalize output path ---
-        let normalized_output = normalize_output_path(&self.output.output)?;
-
         // --- SessionContext + object store ---
         let ctx = SessionContext::new();
-        register_object_store(&normalized_output, &ctx)?;
+        register_object_store(&self.output.normalize_output_path()?, &ctx)?;
 
-        // --- Dispatch command ---
-        let interactive = self.interactive;
-        let mut output = self.output;
-        output.output = normalized_output;
-
-        match self.command {
+        match &self.command {
             Command::TokenRange(args) => {
-                run_token_range(interactive, &output, args, session, &ctx).await?;
+                let (query, params) = args.prepare()?;
+                self.execute_query(ctx, session, query, params, args.concurrency)
+                    .await?;
             }
             Command::Query(args) => {
-                run_from_query(interactive, &output, args, session, &ctx).await?;
+                let (query, params) = args.prepare(&session).await?;
+                self.execute_query(ctx, session, query, params, args.max_concurrency)
+                    .await?;
             }
         }
 
         Ok(())
     }
-}
 
-#[tracing::instrument(skip_all, name = "export")]
-async fn run_token_range(
-    interactive: bool,
-    output: &OutputArgs,
-    args: TokenRangeArgs,
-    session: Arc<scylla::client::session::Session>,
-    ctx: &SessionContext,
-) -> anyhow::Result<()> {
-    tracing::info!(table = %args.table, output = %output.output, "Starting token range scan");
+    async fn execute_query(
+        &self,
+        ctx: SessionContext,
+        session: Arc<scylla::client::session::Session>,
+        query: String,
+        params: Vec<HashMap<String, CqlValue>>,
+        max_concurrency: usize,
+    ) -> anyhow::Result<()> {
+        let mut builder =
+            ScyllaProvider::builder(session, query).with_max_concurrency(max_concurrency);
+        for param_set in params {
+            builder = builder.with_params(param_set);
+        }
 
-    let partition_keys = args.partition_keys.clone();
+        let (progress_span, builder) = if self.interactive {
+            let current_span = tracing::Span::current();
+            current_span.pb_set_style(
+                &ProgressStyle::with_template(
+                    "[{elapsed_precise}] {bar:100.cyan/blue} {pos:>5}/{len:5} {per_sec:.1} [{eta_precise}]",
+                )
+                .context("invalid progress bar template")?,
+            );
+            let span_clone = current_span.clone();
+            let callback = Arc::new(move |_: usize| span_clone.pb_inc(1));
+            (Some(current_span), builder.on_query_complete(callback))
+        } else {
+            (None, builder)
+        };
 
-    let (keyspace, table) = args
-        .table
-        .split_once('.')
-        .context("--table must be in the form {keyspace}.{table}")?;
+        let provider = Arc::new(builder.build().await?);
+        let num_queries = provider.num_queries() as u64;
 
-    let pk_cols_csv = args.partition_keys.join(", ");
-    let select_cols = args.columns.join(", ");
-    let scan_query = format!(
-        "SELECT {select_cols} FROM {keyspace}.{table} WHERE TOKEN({pk_cols_csv}) >= ? AND TOKEN({pk_cols_csv}) < ? BYPASS CACHE"
-    );
+        if self.interactive {
+            tracing::Span::current().pb_set_length(num_queries);
+        }
 
-    let param_sets: Vec<Vec<CqlValue>> = args
-        .token_ranges()
-        .map(|(start, end, ..)| vec![CqlValue::BigInt(start), CqlValue::BigInt(end)])
-        .collect();
-    let num_ranges = param_sets.len();
+        write_hive_partitioned_parquet(&ctx, provider, &self.output).await?;
 
-    let mut builder =
-        ScyllaProvider::builder(session, scan_query).with_max_concurrency(args.concurrency);
+        if let Some(span) = &progress_span {
+            span.pb_set_position(num_queries);
+            span.pb_tick();
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
 
-    for params in param_sets {
-        builder = builder.with_params(params);
+        Ok(())
     }
-
-    // Set up progress bar styling if interactive
-    let (progress_span, builder) = Cli::setup_progress_bar(interactive, builder, |b, callback| {
-        b.on_query_complete(callback)
-    })?;
-
-    let provider = Arc::new(builder.build().await?);
-
-    let partition_cols = output.partition_by.clone().unwrap_or(partition_keys);
-
-    // Set progress bar length after we know the count
-    if interactive {
-        tracing::Span::current().pb_set_length(num_ranges as u64);
-    }
-
-    write_hive_partitioned_parquet(ctx, provider, &output.output, partition_cols).await?;
-
-    if let Some(span) = &progress_span {
-        // Force final progress bar update to 100%
-        span.pb_set_position(num_ranges as u64);
-        span.pb_tick();
-
-        // Give indicatif time to render the update
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
-
-    tracing::info!("Token range scan completed successfully");
-    Ok(())
 }
 
 fn setup_tracing(interactive: bool) {
@@ -290,101 +322,6 @@ fn setup_tracing(interactive: bool) {
             .with(env_filter)
             .with(tracing_subscriber::fmt::layer())
             .init();
-    }
-}
-
-#[tracing::instrument(skip_all, name = "export")]
-async fn run_from_query(
-    _interactive: bool,
-    output: &OutputArgs,
-    args: QueryArgs,
-    session: Arc<scylla::client::session::Session>,
-    ctx: &SessionContext,
-) -> anyhow::Result<()> {
-    tracing::info!(query = %args.query, output = %output.output, "Starting from-query");
-
-    // Prepare the statement first to get metadata for parameter conversion
-    let prepared = session
-        .prepare(args.query.as_str())
-        .await
-        .context("Failed to prepare CQL query")?;
-
-    let mut builder = ScyllaProvider::builder(session, args.query);
-
-    if let Some(params_file) = args.params {
-        let raw = params::parse_params_from_file(&params_file)?;
-        tracing::debug!(count = raw.len(), "Converting parameter sets");
-        for param_set in params::convert_param_sets(raw, &prepared)? {
-            builder = builder.with_params(param_set);
-        }
-    }
-    if let Some(max_concurrency) = args.max_concurrency {
-        builder = builder.with_max_concurrency(max_concurrency);
-    }
-
-    // Set up progress bar styling if interactive
-    let (progress_span, builder) =
-        Cli::setup_progress_bar(_interactive, builder, |b, callback| {
-            b.on_query_complete(callback)
-        })?;
-
-    let provider = Arc::new(builder.build().await?);
-
-    let partition_cols = output.partition_by.clone().unwrap_or_default();
-    let num_queries = provider.num_queries();
-
-    // Set progress bar length after we know the count
-    if _interactive {
-        tracing::Span::current().pb_set_length(num_queries as u64);
-    }
-
-    write_hive_partitioned_parquet(ctx, provider, &output.output, partition_cols).await?;
-
-    if let Some(span) = &progress_span {
-        // Force final progress bar update to 100%
-        span.pb_set_position(num_queries as u64);
-        span.pb_tick();
-
-        // Give indicatif time to render the update
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    }
-
-    tracing::info!("From-query completed successfully");
-    Ok(())
-}
-
-/// Normalizes an output path to a proper URL.
-/// If the path doesn't have a scheme, treats it as a file path and converts to absolute file:// URL.
-fn normalize_output_path(output: &str) -> anyhow::Result<String> {
-    // Try parsing as URL first
-    match Url::parse(output) {
-        Ok(url) => {
-            // Valid URL with scheme
-            Ok(url.to_string())
-        }
-        Err(url::ParseError::RelativeUrlWithoutBase) => {
-            // No scheme, treat as file path
-            let path = std::path::Path::new(output);
-            let absolute_path = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                std::env::current_dir()?.join(path)
-            };
-
-            // Convert to file:// URL
-            let file_url = Url::from_file_path(&absolute_path).map_err(|_| {
-                anyhow::anyhow!(
-                    "Failed to convert path to file:// URL: {}",
-                    absolute_path.display()
-                )
-            })?;
-
-            Ok(file_url.to_string())
-        }
-        Err(e) => {
-            // Other parse errors
-            Err(anyhow::anyhow!("Invalid output path: {}", e))
-        }
     }
 }
 
