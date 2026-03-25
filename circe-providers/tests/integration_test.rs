@@ -11,6 +11,21 @@ use scylla::{
     client::{session::Session, session_builder::SessionBuilder},
     value::CqlValue,
 };
+use tokio::sync::{OnceCell, Semaphore};
+
+static SETUP: OnceCell<()> = OnceCell::const_new();
+static TEST_SEMAPHORE: Semaphore = Semaphore::const_new(2);
+
+async fn new_session() -> Arc<Session> {
+    SETUP.get_or_init(setup_scylla).await;
+    Arc::new(
+        SessionBuilder::new()
+            .known_node("127.0.0.1:9042")
+            .build()
+            .await
+            .expect("Failed to connect to ScyllaDB"),
+    )
+}
 
 /// Reads from a TableProvider and writes hive-partitioned Parquet files.
 ///
@@ -47,14 +62,14 @@ where
     Ok(())
 }
 
-async fn setup_scylla() -> Arc<Session> {
-    let session = SessionBuilder::new()
-        .known_node("127.0.0.1:9042")
-        .build()
-        .await
-        .expect("Failed to connect to ScyllaDB");
-
-    let session = Arc::new(session);
+async fn setup_scylla() {
+    let session = Arc::new(
+        SessionBuilder::new()
+            .known_node("127.0.0.1:9042")
+            .build()
+            .await
+            .expect("Failed to connect to ScyllaDB"),
+    );
 
     // Create keyspace
     session
@@ -119,13 +134,12 @@ async fn setup_scylla() -> Arc<Session> {
             .await
             .expect("Failed to insert row");
     }
-
-    session
 }
 
 #[tokio::test]
 async fn test_from_query_simple() {
-    let session = setup_scylla().await;
+    let _permit = TEST_SEMAPHORE.acquire().await.unwrap();
+    let session = new_session().await;
 
     let provider: ScyllaProvider<()> =
         ScyllaProvider::builder(session, "SELECT * FROM test_ks.test_export".to_string())
@@ -165,7 +179,8 @@ async fn test_from_query_simple() {
 
 #[tokio::test]
 async fn test_from_query_with_limit() {
-    let session = setup_scylla().await;
+    let _permit = TEST_SEMAPHORE.acquire().await.unwrap();
+    let session = new_session().await;
 
     let provider: ScyllaProvider<()> = ScyllaProvider::builder(
         session,
@@ -199,7 +214,8 @@ async fn test_from_query_with_limit() {
 
 #[tokio::test]
 async fn test_from_query_single_param_set() {
-    let session = setup_scylla().await;
+    let _permit = TEST_SEMAPHORE.acquire().await.unwrap();
+    let session = new_session().await;
 
     let param_sets = vec![vec![CqlValue::Text("us-east".to_string())]];
 
@@ -248,7 +264,8 @@ async fn test_from_query_single_param_set() {
 
 #[tokio::test]
 async fn test_from_query_multiple_params() {
-    let session = setup_scylla().await;
+    let _permit = TEST_SEMAPHORE.acquire().await.unwrap();
+    let session = new_session().await;
 
     let param_sets = vec![vec![
         CqlValue::Text("us-east".to_string()),
@@ -307,7 +324,8 @@ async fn test_from_query_multiple_params() {
 
 #[tokio::test]
 async fn test_from_query_concurrent_param_sets() {
-    let session = setup_scylla().await;
+    let _permit = TEST_SEMAPHORE.acquire().await.unwrap();
+    let session = new_session().await;
 
     let param_sets = vec![
         vec![CqlValue::Text("us-east".to_string())],
@@ -365,7 +383,8 @@ async fn test_from_query_concurrent_param_sets() {
 
 #[tokio::test]
 async fn test_from_query_concurrent_multiple_filter_columns() {
-    let session = setup_scylla().await;
+    let _permit = TEST_SEMAPHORE.acquire().await.unwrap();
+    let session = new_session().await;
 
     let param_sets = vec![
         vec![CqlValue::Text("us-east".to_string()), CqlValue::Int(25)],

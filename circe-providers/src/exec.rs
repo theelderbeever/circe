@@ -53,15 +53,19 @@ impl<P> fmt::Debug for ScyllaExec<P> {
     }
 }
 
-impl<P: SerializeRow + Clone + Send + Sync + 'static> ScyllaExec<P> {
+impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> ScyllaExec<P> {
     pub fn new(
         session: Arc<ScyllaSession>,
         schema: SchemaRef,
         prepared: Arc<PreparedStatement>,
-        params: Vec<P>,
+        mut params: Vec<P>,
         num_partitions: usize,
         concurrency: usize,
     ) -> Self {
+        if params.is_empty() {
+            params.push(P::default());
+        }
+
         let num_partitions = num_partitions.max(1);
         let semaphore = Arc::new(Semaphore::new(concurrency));
 

@@ -40,7 +40,7 @@ impl<P> fmt::Debug for ScyllaProvider<P> {
     }
 }
 
-impl<P: SerializeRow + Clone + Send + Sync + 'static> ScyllaProvider<P> {
+impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> ScyllaProvider<P> {
     pub fn builder(session: Arc<ScyllaSession>, query: String) -> ScyllaProviderBuilder<P> {
         ScyllaProviderBuilder::new(session, query)
     }
@@ -64,7 +64,9 @@ impl<P: SerializeRow + Clone + Send + Sync + 'static> ScyllaProvider<P> {
 }
 
 #[async_trait]
-impl<P: SerializeRow + Clone + Send + Sync + 'static> TableProvider for ScyllaProvider<P> {
+impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> TableProvider
+    for ScyllaProvider<P>
+{
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -90,7 +92,7 @@ impl<P: SerializeRow + Clone + Send + Sync + 'static> TableProvider for ScyllaPr
             self.prepared.clone(),
             self.param_sets.clone(),
             state.config().target_partitions(),
-            self.max_concurrency.clamp(1, self.param_sets.len()),
+            self.max_concurrency.clamp(1, self.param_sets.len().max(1)),
         );
         if let Some(cb) = &self.on_query_complete {
             exec = exec.with_on_query_complete(cb.clone());
@@ -111,7 +113,7 @@ pub struct ScyllaProviderBuilder<P = ()> {
     on_query_complete: Option<QueryCompleteCallback>,
 }
 
-impl<P: SerializeRow + Clone + Send + Sync + 'static> ScyllaProviderBuilder<P> {
+impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> ScyllaProviderBuilder<P> {
     fn new(session: Arc<ScyllaSession>, query: String) -> Self {
         Self {
             session,
