@@ -1,7 +1,10 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Context;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{
+    Args, Parser, Subcommand, ValueEnum,
+    builder::styling::{AnsiColor, Effects, Styles},
+};
 use datafusion::{object_store::aws::AmazonS3Builder, prelude::SessionContext};
 use indicatif::ProgressStyle;
 use itertools::Itertools;
@@ -16,8 +19,14 @@ use crate::writer::write;
 pub(crate) mod params;
 pub(crate) mod writer;
 
+const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+    .placeholder(AnsiColor::Cyan.on_default());
+
 #[derive(Debug, Parser)]
-#[command(name = "circe", about = "Export ScyllaDB tables to columnar formats")]
+#[command(name = "circe", about = "Export ScyllaDB tables/queries to file with post processing", styles = STYLES)]
 pub struct Cli {
     /// Enable interactive progress display
     #[arg(short = 'i', long, global = true)]
@@ -81,7 +90,12 @@ pub struct OutputArgs {
     pub single_file: bool,
 
     /// Hive partition columns (comma-separated)
-    #[arg(long, value_delimiter = ',', conflicts_with = "single_file")]
+    #[arg(
+        short = 'b',
+        long,
+        value_delimiter = ',',
+        conflicts_with = "single_file"
+    )]
     pub partition_by: Option<Vec<String>>,
 
     /// Optional DataFusion SQL to run on the fetched data before writing.
@@ -167,8 +181,12 @@ pub struct TokenRangeArgs {
     #[arg(short, long, value_delimiter = ',', default_value = "*")]
     pub columns: Vec<String>,
 
-    /// Number of token range splits and max concurrent queries (defaults to 2 * num_cpus)
-    #[arg(short = 'C', long, default_value_t = num_cpus::get() * 2)]
+    /// Number of token range splits and max concurrent queries (defaults to 3 * 100 * num_cpus)
+    #[arg(short = 'S', long, default_value_t = num_cpus::get() * 3 * 100)]
+    pub splits: usize,
+
+    /// Number of max concurrent queries (defaults to 3 * num_cpus)
+    #[arg(short = 'C', long, default_value_t = num_cpus::get() * 3)]
     pub concurrency: usize,
 }
 
@@ -203,7 +221,7 @@ impl TokenRangeArgs {
         const MAX_TOKEN: i128 = i64::MAX as i128;
 
         let total_range = (MAX_TOKEN - MIN_TOKEN) as usize;
-        let step = total_range / self.concurrency;
+        let step = total_range / self.splits;
 
         (MIN_TOKEN..=MAX_TOKEN)
             .step_by(step)
