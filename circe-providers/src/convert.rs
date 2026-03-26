@@ -180,8 +180,11 @@ fn build_array(
             let mut builder = StringBuilder::with_capacity(capacity, capacity * 32);
             for row in rows {
                 match row.columns.get(col_idx) {
+                    Some(Some(CqlValue::Text(s) | CqlValue::Ascii(s))) => {
+                        builder.append_value(s.as_str())
+                    }
                     Some(Some(val)) => match cql_value_to_string(val) {
-                        Some(s) => builder.append_value(s),
+                        Some(s) => builder.append_value(s.as_str()),
                         None => builder.append_null(),
                     },
                     _ => builder.append_null(),

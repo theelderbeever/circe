@@ -15,7 +15,7 @@ use scylla::value::Row;
 use crate::convert::rows_to_record_batch;
 
 /// Default batch size for accumulating rows before converting to RecordBatch.
-pub const DEFAULT_BATCH_SIZE: usize = 8192;
+pub const DEFAULT_BATCH_SIZE: usize = 65_536;
 
 /// A stream that accumulates rows into batches and converts them to Arrow RecordBatches.
 ///
