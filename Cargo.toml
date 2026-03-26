@@ -78,9 +78,9 @@ thiserror = "1"
 pretty_assertions = "1"
 scylla = { version = "1.4.1", features = ["full-serialization"] }
 uuid = "1"
-object_store = { version = "0.12", features = ["aws", "serde", "serde_json"] }
+object_store = { version = "0.13", features = ["aws", "serde", "serde_json"] }
 duration-string = "0.5"
-datafusion = "52"
+datafusion = "53"
 itertools = "0.14"
 futures = "0.3"
 async-trait = "0.1"

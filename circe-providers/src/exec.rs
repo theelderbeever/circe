@@ -38,7 +38,7 @@ pub struct ScyllaExec<P> {
     partitioned_params: Vec<Vec<P>>,
     semaphore: Arc<Semaphore>,
     schema: SchemaRef,
-    properties: PlanProperties,
+    properties: Arc<PlanProperties>,
     projection: Option<Vec<usize>>,
     on_query_complete: Option<QueryCompleteCallback>,
 }
@@ -69,12 +69,12 @@ impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> ScyllaExec<P> {
         let num_partitions = num_partitions.max(1);
         let semaphore = Arc::new(Semaphore::new(concurrency));
 
-        let properties = PlanProperties::new(
+        let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(num_partitions),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
 
         let chunk_size = params.len().div_ceil(num_partitions);
         let partitioned_params = params.chunks(chunk_size).map(|s| s.to_vec()).collect();
@@ -98,12 +98,12 @@ impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> ScyllaExec<P> {
 
     pub fn with_projection(mut self, projection: Vec<usize>) -> Result<Self> {
         let projected_schema = Arc::new(self.schema.project(&projection)?);
-        self.properties = PlanProperties::new(
+        self.properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(projected_schema),
-            self.properties.partitioning,
+            self.properties.partitioning.clone(),
             self.properties.emission_type,
             self.properties.boundedness,
-        );
+        ));
         self.projection = Some(projection);
         Ok(self)
     }
@@ -124,7 +124,7 @@ impl<P: SerializeRow + Clone + Send + Sync + 'static> ExecutionPlan for ScyllaEx
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
