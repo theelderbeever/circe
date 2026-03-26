@@ -14,12 +14,18 @@ tokio = { workspace = true, features = ["full"] }
 
 # Only needed for examples
 scylla = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+indicatif = { workspace = true, optional = true }
 
 [features]
-examples = ["scylla"]
+examples = ["scylla", "uuid", "indicatif"]
 
 [[example]]
 name = "populate_test_data"
+required-features = ["examples"]
+
+[[example]]
+name = "bench_setup"
 required-features = ["examples"]
 
 
@@ -71,6 +77,7 @@ tokio = { version = "1.49", features = ["full"] }
 thiserror = "1"
 pretty_assertions = "1"
 scylla = { version = "1.4.1", features = ["full-serialization"] }
+uuid = "1"
 object_store = { version = "0.12", features = ["aws", "serde", "serde_json"] }
 duration-string = "0.5"
 datafusion = "52"

@@ -576,10 +576,12 @@ dependencies = [
  "circe-cli",
  "circe-providers",
  "clap",
+ "indicatif",
  "pretty_assertions",
  "scylla",
  "tikv-jemallocator",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
