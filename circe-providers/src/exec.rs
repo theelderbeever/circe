@@ -184,7 +184,7 @@ impl<P: SerializeRow + Clone + Send + Sync + 'static> ExecutionPlan for ScyllaEx
                 }
             })
             .buffer_unordered(usize::MAX)
-            .try_flatten();
+            .try_flatten_unordered(None);
 
         BatchingStream::new(
             Box::pin(row_stream),
