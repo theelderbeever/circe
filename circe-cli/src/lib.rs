@@ -8,7 +8,10 @@ use clap::{
 use datafusion::{object_store::aws::AmazonS3Builder, prelude::SessionContext};
 use indicatif::ProgressStyle;
 use itertools::Itertools;
-use scylla::{client::session_builder::SessionBuilder, frame::Compression, value::CqlValue};
+use scylla::{
+    client::session_builder::SessionBuilder, frame::Compression, statement::Consistency,
+    value::CqlValue,
+};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use url::Url;
 
@@ -42,6 +45,28 @@ pub struct Cli {
     pub command: Command,
 }
 
+#[derive(Debug, Clone, Default, ValueEnum)]
+pub enum ConsistencyLevel {
+    One,
+    LocalOne,
+    #[default]
+    LocalQuorum,
+    Quorum,
+    All,
+}
+
+impl From<ConsistencyLevel> for Consistency {
+    fn from(c: ConsistencyLevel) -> Self {
+        match c {
+            ConsistencyLevel::One => Self::One,
+            ConsistencyLevel::LocalOne => Self::LocalOne,
+            ConsistencyLevel::LocalQuorum => Self::LocalQuorum,
+            ConsistencyLevel::Quorum => Self::Quorum,
+            ConsistencyLevel::All => Self::All,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct ScyllaArgs {
     /// ScyllaDB contact points (comma-separated)
@@ -59,6 +84,11 @@ pub struct ScyllaArgs {
     /// ScyllaDB password
     #[arg(short = 'P', long, env = "CIRCE_PASSWORD")]
     pub password: Option<String>,
+
+    /// Read consistency level. Use local_one for maximum export throughput
+    /// when stale reads are acceptable.
+    #[arg(long, env = "CIRCE_CONSISTENCY", default_value = "local-quorum")]
+    pub consistency: ConsistencyLevel,
 }
 
 #[derive(Debug, Clone, Default, ValueEnum)]
@@ -294,14 +324,28 @@ impl Cli {
             Command::TokenRange(args) => {
                 let (query, params) = args.prepare()?;
                 tracing::debug!("{query}");
-                self.execute_query(ctx, session, query, params, args.concurrency)
-                    .await?;
+                self.execute_query(
+                    ctx,
+                    session,
+                    query,
+                    params,
+                    args.concurrency,
+                    self.scylla.consistency.clone().into(),
+                )
+                .await?;
             }
             Command::Query(args) => {
                 let (query, params) = args.prepare(&session).await?;
                 tracing::debug!("{query}");
-                self.execute_query(ctx, session, query, params, args.max_concurrency)
-                    .await?;
+                self.execute_query(
+                    ctx,
+                    session,
+                    query,
+                    params,
+                    args.max_concurrency,
+                    self.scylla.consistency.clone().into(),
+                )
+                .await?;
             }
         }
 
@@ -316,9 +360,11 @@ impl Cli {
         query: String,
         params: Vec<HashMap<String, CqlValue>>,
         max_concurrency: usize,
+        consistency: Consistency,
     ) -> anyhow::Result<()> {
-        let mut builder =
-            ScyllaProvider::builder(session, query).with_max_concurrency(max_concurrency);
+        let mut builder = ScyllaProvider::builder(session, query)
+            .with_max_concurrency(max_concurrency)
+            .with_consistency(consistency);
         for param_set in params {
             builder = builder.with_params(param_set);
         }

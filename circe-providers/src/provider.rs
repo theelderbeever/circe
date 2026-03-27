@@ -10,8 +10,9 @@ use datafusion::{
     physical_plan::ExecutionPlan,
 };
 use scylla::{
-    client::session::Session as ScyllaSession, serialize::row::SerializeRow,
-    statement::prepared::PreparedStatement,
+    client::session::Session as ScyllaSession,
+    serialize::row::SerializeRow,
+    statement::{Consistency, prepared::PreparedStatement},
 };
 
 use crate::{convert::to_arrow, error::ScyllaProviderError};
@@ -110,6 +111,7 @@ pub struct ScyllaProviderBuilder<P = ()> {
     query: String,
     params: Vec<P>,
     max_concurrency: Option<usize>,
+    consistency: Option<Consistency>,
     on_query_complete: Option<QueryCompleteCallback>,
 }
 
@@ -120,6 +122,7 @@ impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> ScyllaProviderBu
             query,
             params: vec![],
             max_concurrency: None,
+            consistency: None,
             on_query_complete: None,
         }
     }
@@ -138,6 +141,11 @@ impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> ScyllaProviderBu
         self
     }
 
+    pub fn with_consistency(mut self, consistency: Consistency) -> Self {
+        self.consistency = Some(consistency);
+        self
+    }
+
     /// A callback to run upon the completion of a query/parameter set
     pub fn on_query_complete(mut self, cb: QueryCompleteCallback) -> Self {
         self.on_query_complete = Some(cb);
@@ -147,12 +155,17 @@ impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> ScyllaProviderBu
     pub async fn build(self) -> Result<ScyllaProvider<P>> {
         let max_concurrency = self.max_concurrency.unwrap_or(self.params.len()).max(1);
 
-        let prepared = Arc::new(
-            self.session
-                .prepare(self.query.as_str())
-                .await
-                .map_err(ScyllaProviderError::Prepare)?,
-        );
+        let mut prepared = self
+            .session
+            .prepare(self.query.as_str())
+            .await
+            .map_err(ScyllaProviderError::Prepare)?;
+
+        if let Some(consistency) = self.consistency {
+            prepared.set_consistency(consistency);
+        }
+
+        let prepared = Arc::new(prepared);
 
         let schema = Arc::new(ScyllaProvider::<P>::metadata_to_schema(&prepared)?);
 
