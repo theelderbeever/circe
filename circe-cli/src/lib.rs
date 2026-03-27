@@ -89,6 +89,11 @@ pub struct ScyllaArgs {
     /// when stale reads are acceptable.
     #[arg(long, env = "CIRCE_CONSISTENCY", default_value = "local-quorum")]
     pub consistency: ConsistencyLevel,
+
+    /// CQL page size (rows per fetch). Defaults to the driver default (5000).
+    /// For bulk exports increase to 25000–50000 to reduce round-trips.
+    #[arg(long, env = "CIRCE_PAGE_SIZE")]
+    pub page_size: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default, ValueEnum)]
@@ -331,6 +336,7 @@ impl Cli {
                     params,
                     args.concurrency,
                     self.scylla.consistency.clone().into(),
+                    self.scylla.page_size,
                 )
                 .await?;
             }
@@ -344,6 +350,7 @@ impl Cli {
                     params,
                     args.max_concurrency,
                     self.scylla.consistency.clone().into(),
+                    self.scylla.page_size,
                 )
                 .await?;
             }
@@ -352,6 +359,7 @@ impl Cli {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip_all)]
     async fn execute_query(
         &self,
@@ -361,10 +369,12 @@ impl Cli {
         params: Vec<HashMap<String, CqlValue>>,
         max_concurrency: usize,
         consistency: Consistency,
+        page_size: Option<i32>,
     ) -> anyhow::Result<()> {
         let mut builder = ScyllaProvider::builder(session, query)
             .with_max_concurrency(max_concurrency)
-            .with_consistency(consistency);
+            .with_consistency(consistency)
+            .with_page_size(page_size);
         for param_set in params {
             builder = builder.with_params(param_set);
         }

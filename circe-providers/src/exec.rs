@@ -23,7 +23,7 @@ use scylla::{
     client::session::Session as ScyllaSession, serialize::row::SerializeRow,
     statement::prepared::PreparedStatement, value::Row,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::batching::BatchingStream;
 
@@ -171,16 +171,19 @@ impl<P: SerializeRow + Clone + Send + Sync + 'static> ExecutionPlan for ScyllaEx
                 let on_query_complete = on_query_complete.clone();
                 let semaphore = semaphore.clone();
                 async move {
-                    let _permit = semaphore.acquire().await;
+                    let permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?;
                     let row_stream = query_with_params(session, prepared, params).await?;
-                    Ok::<_, DataFusionError>(OnCompleteStream::new(row_stream, move || {
+                    Ok::<_, DataFusionError>(OnCompleteStream::new(row_stream, permit, move || {
                         if let Some(cb) = &on_query_complete {
                             cb(index);
                         }
                     }))
                 }
             })
-            .buffer_unordered(10)
+            .buffer_unordered(usize::MAX)
             .try_flatten();
 
         BatchingStream::new(
@@ -212,16 +215,19 @@ async fn query_with_params<P: SerializeRow>(
     Ok(typed_stream.map_err(|e| DataFusionError::External(Box::new(e))))
 }
 
-/// A stream wrapper that invokes a callback when the inner stream ends.
+/// A stream wrapper that holds a semaphore permit for its lifetime and invokes
+/// a callback when the inner stream ends cleanly.
 struct OnCompleteStream<S, F> {
     inner: S,
+    _permit: OwnedSemaphorePermit,
     on_complete: Option<F>,
 }
 
 impl<S, F> OnCompleteStream<S, F> {
-    fn new(inner: S, on_complete: F) -> Self {
+    fn new(inner: S, permit: OwnedSemaphorePermit, on_complete: F) -> Self {
         Self {
             inner,
+            _permit: permit,
             on_complete: Some(on_complete),
         }
     }

@@ -112,6 +112,7 @@ pub struct ScyllaProviderBuilder<P = ()> {
     params: Vec<P>,
     max_concurrency: Option<usize>,
     consistency: Option<Consistency>,
+    page_size: Option<i32>,
     on_query_complete: Option<QueryCompleteCallback>,
 }
 
@@ -123,6 +124,7 @@ impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> ScyllaProviderBu
             params: vec![],
             max_concurrency: None,
             consistency: None,
+            page_size: None,
             on_query_complete: None,
         }
     }
@@ -146,6 +148,11 @@ impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> ScyllaProviderBu
         self
     }
 
+    pub fn with_page_size(mut self, page_size: Option<i32>) -> Self {
+        self.page_size = page_size;
+        self
+    }
+
     /// A callback to run upon the completion of a query/parameter set
     pub fn on_query_complete(mut self, cb: QueryCompleteCallback) -> Self {
         self.on_query_complete = Some(cb);
@@ -163,6 +170,9 @@ impl<P: SerializeRow + Clone + Default + Send + Sync + 'static> ScyllaProviderBu
 
         if let Some(consistency) = self.consistency {
             prepared.set_consistency(consistency);
+        }
+        if let Some(page_size) = self.page_size {
+            prepared.set_page_size(page_size);
         }
 
         let prepared = Arc::new(prepared);
